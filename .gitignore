@@ -1,0 +1,32 @@
+# Ambiente virtuale Python
+.venv/
+venv/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Output di PyInstaller (rigenerati da build.ps1)
+build/
+dist/
+*.spec
+
+# Icona generata da tools/make_icon.py
+assets/icon.ico
+
+# Log (possono contenere nomi di chat e dati personali)
+*.log
+*.log.*
+
+# Dati utente: sessione Telegram e impostazioni (non condividere mai)
+session.dat
+*.session
+settings.json
+.env
+
+# Editor e sistema operativo
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
