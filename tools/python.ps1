@@ -31,9 +31,20 @@ function Get-ProjectPython {
     }
     $dir = ".venv-" + ($env:USERNAME -replace '[^\w.-]', '_')
     Write-Host "Creo l'ambiente Python $dir (solo la prima volta)..."
-    & (Find-BasePython) -m venv $dir
+    $base = Find-BasePython
+    Invoke-Checked "Creazione dell'ambiente Python non riuscita" { & $base -m venv $dir }
     $exe = (Resolve-Path (Join-Path $dir "Scripts\python.exe")).Path
-    & $exe -m pip install -q -r requirements.txt
-    if ($LASTEXITCODE -ne 0) { throw "Installazione delle librerie non riuscita" }
+    Invoke-Checked "Installazione delle librerie non riuscita" {
+        & $exe -m pip install -q --disable-pip-version-check -r requirements.txt
+    }
     return $exe
+}
+
+function Invoke-Checked([string]$failure, [scriptblock]$command) {
+    # Windows PowerShell 5.1 con ErrorActionPreference=Stop tratta come errore ogni riga che un programma
+    # scrive su stderr (anche un semplice avviso di pip): per i programmi conta solo il codice di uscita
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try { & $command 2>&1 | ForEach-Object { Write-Host $_ } } finally { $ErrorActionPreference = $previous }
+    if ($LASTEXITCODE -ne 0) { throw $failure }
 }

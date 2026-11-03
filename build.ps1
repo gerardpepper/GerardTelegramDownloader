@@ -4,11 +4,13 @@ Set-Location $PSScriptRoot
 . .\tools\python.ps1
 $python = Get-ProjectPython
 
-& $python -m pip install -q -r requirements.txt -r requirements-dev.txt
-& $python -m unittest discover -s tests
-if ($LASTEXITCODE -ne 0) { throw "Test falliti: build interrotta" }
-& $python tools\make_icon.py
-& $python -m PyInstaller --noconfirm --clean --onefile --windowed `
-    --name GerardTelegramDownloader --icon assets\icon.ico main.py
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller non riuscito" }
+Invoke-Checked "Installazione delle librerie non riuscita" {
+    & $python -m pip install -q --disable-pip-version-check -r requirements.txt -r requirements-dev.txt
+}
+Invoke-Checked "Test falliti: build interrotta" { & $python -m unittest discover -s tests }
+Invoke-Checked "Creazione dell'icona non riuscita" { & $python tools\make_icon.py }
+Invoke-Checked "PyInstaller non riuscito" {
+    & $python -m PyInstaller --noconfirm --clean --onefile --windowed `
+        --name GerardTelegramDownloader --icon assets\icon.ico main.py
+}
 Write-Host "Fatto: dist\GerardTelegramDownloader.exe"
