@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import time
+import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -30,6 +31,8 @@ CHUNK_TIMEOUT = 120              # secondi senza dati prima di considerare blocc
 PHOTO_TIMEOUT = 300
 FOLLOW_CHECK_SECONDS = 600       # controllo di sicurezza periodico quando si segue una chat
 FOLLOW_GROUPING_DELAY = 3        # attesa dopo un nuovo messaggio, per prendere insieme gli album
+REQUEUE_BATCH = 100              # file sospesi chiesti a Telegram in una volta
+REQUEUE_LOW_WATER = 50           # se ne chiedono altri solo quando in coda ne restano meno di così
 
 # errori di rete/Telegram da cui si riparte: IncompleteReadError (EOFError) è quello che bloccava i download
 _TRANSIENT = (errors.RPCError, OSError, ConnectionError, EOFError, asyncio.TimeoutError)
@@ -52,6 +55,18 @@ def sanitize(name: str, fallback: str = "file") -> str:
     return stem + ext
 
 
+def _fold(text: str) -> str:
+    """Testo per i confronti: minuscolo, senza accenti, con _ - . trattati come spazi («Mario_Rossi» = «mario rossi»)."""
+    text = unicodedata.normalize("NFKD", text.casefold())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(re.sub(r"[_\-.]+", " ", text).split())
+
+
+def parse_name_filter(text: str) -> list[str]:
+    """«fattura, preventivo» → parole da cercare (basta che ne compaia una). Le virgole separano, gli spazi no."""
+    return [w for w in (_fold(part) for part in re.split(r"[,;]+", text)) if w]
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -66,6 +81,30 @@ class Cancelled(Exception):
 
 class IntegrityError(Exception):
     pass
+
+
+class Slots:
+    """Download contemporanei. Più motori possono condividerli (es. tutte le chat seguite insieme)."""
+
+    def __init__(self, limit: int = 1):
+        self.limit = max(1, min(MAX_PARALLEL, limit))
+        self.busy = 0
+        self.changed = asyncio.Event()
+
+    def release(self) -> None:
+        self.busy -= 1
+        self.changed.set()
+
+
+class FloodGate:
+    """Pausa imposta da Telegram (FloodWait): vale per tutto l'account, quindi è condivisa tra i motori."""
+
+    def __init__(self):
+        self.until = 0.0  # time.monotonic() fino a cui non si fanno richieste
+        self.streak = 0   # FloodWait consecutivi: l'attesa aggiuntiva cresce
+
+    def left(self) -> float:
+        return max(0.0, self.until - time.monotonic())
 
 
 class Listener(Protocol):
@@ -86,6 +125,8 @@ class JobOptions:
     source_name: str
     destination: Path
     extensions: set[str]            # vuoto = tutti i tipi
+    name_words: list[str] = field(default_factory=list)  # da parse_name_filter; vuoto = qualsiasi nome
+    name_in_caption: bool = True    # le parole valgono anche se sono nel testo del messaggio
     min_size: int = 0               # byte
     max_size: int = 0               # byte, 0 = nessun limite
     duplicate_policy: str = "skip"  # skip | rename | overwrite
@@ -147,17 +188,20 @@ class Summary:
 
 
 class DownloadEngine:
-    def __init__(self, client: TelegramClient, db: StateDB, listener: Listener):
+    def __init__(self, client: TelegramClient, db: StateDB, listener: Listener,
+                 slots: Slots | None = None, flood: FloodGate | None = None):
         self.client = client
         self.db = db
         self.l = listener
         self._running = asyncio.Event()
         self._running.set()
-        self._flood_free = asyncio.Event()
-        self._flood_free.set()
         self._wake = asyncio.Event()
+        self._cancel_event = asyncio.Event()
         self._cancelled = False
-        self._flood_streak = 0
+        # condivisi se più motori lavorano insieme sullo stesso account
+        self._flood = flood or FloodGate()
+        self._slots = slots or Slots()
+        self._shared_slots = slots is not None
         self._total_files = 0
         self._total_bytes = 0
         self._done_files = 0
@@ -168,10 +212,7 @@ class DownloadEngine:
         self._queued: set[tuple[int, int]] = set()  # messaggi già messi in coda in questo batch
         self._last_id = 0
         self._opts: JobOptions | None = None
-        # download contemporanei: modificabile durante il batch (set_parallel), i worker si adeguano tra un file e l'altro
-        self._parallel = 1
-        self._busy = 0
-        self._slots_changed = asyncio.Event()
+        self.requeue_left = 0  # file sospesi non ancora rimessi in coda: il totale dei file crescerà ancora
 
     # ---- controllo -------------------------------------------------------
 
@@ -189,41 +230,76 @@ class DownloadEngine:
 
     def cancel(self) -> None:
         self._cancelled = True
+        self._cancel_event.set()
         self._running.set()
-        self._flood_free.set()
         self._wake.set()
-        self._slots_changed.set()
 
     @property
     def parallel(self) -> int:
-        return self._parallel
+        return self._slots.limit
 
     def set_parallel(self, n: int) -> None:
         """Cambia i download contemporanei. Se diminuiscono, quelli già iniziati finiscono e poi ci si allinea."""
         n = max(1, min(MAX_PARALLEL, n))
-        if n == self._parallel:
+        if n == self._slots.limit:
             return
-        self._parallel = n
-        self._slots_changed.set()
+        self._slots.limit = n
+        self._slots.changed.set()
         self.l.log("info", tr("Download paralleli: {n}", n=n))
 
-    async def _take_slot(self) -> None:
-        while self._busy >= self._parallel and not self._cancelled:
-            self._slots_changed.clear()
-            await self._slots_changed.wait()
-        self._busy += 1
+    async def _wait(self, event: asyncio.Event) -> None:
+        """Attende l'evento, ma esce subito (Cancelled) se questo motore viene annullato."""
+        if not event.is_set():
+            waiters = [asyncio.ensure_future(event.wait()), asyncio.ensure_future(self._cancel_event.wait())]
+            try:
+                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                for w in waiters:
+                    w.cancel()
+        if self._cancelled:
+            raise Cancelled
 
-    def _release_slot(self) -> None:
-        self._busy -= 1
-        self._slots_changed.set()
+    async def _take_slot(self) -> None:
+        slots = self._slots
+        while True:
+            if self._shared_slots and not self._running.is_set():
+                await self._wait(self._running)  # in pausa non si prendono slot condivisi con altre chat
+            if slots.busy < slots.limit:
+                break
+            slots.changed.clear()
+            await self._wait(slots.changed)
+        slots.busy += 1
+
+    async def _sleep_without_slot(self, seconds: float) -> None:
+        """Attesa prima di un nuovo tentativo: intanto lo slot va a un altro file
+        (un file che non scende non deve bloccare gli altri download)."""
+        await self._wait_without_slot(self._sleep(seconds))
+
+    async def _download_checkpoint(self) -> None:
+        """Come _checkpoint, ma dentro un download (slot occupato): in pausa lo slot passa
+        alle altre chat seguite, che condividono gli stessi slot."""
+        if self._shared_slots and not self._running.is_set() and not self._cancelled:
+            await self._wait_without_slot(self._wait(self._running))
+        await self._checkpoint()
+
+    async def _wait_without_slot(self, waiting) -> None:
+        self._slots.release()
+        try:
+            await waiting
+        finally:
+            try:
+                await self._take_slot()
+            except Cancelled:
+                self._slots.busy += 1  # il worker lo rilascia uscendo: i conti tornano
+                raise
 
     async def _checkpoint(self) -> None:
         if self._cancelled:
             raise Cancelled
         if not self._running.is_set():
-            await self._running.wait()
-        if not self._flood_free.is_set():
-            await self._flood_free.wait()
+            await self._wait(self._running)
+        if self._flood.left() > 0:
+            await self._wait_flood(report=False)
         if self._cancelled:
             raise Cancelled
 
@@ -236,21 +312,28 @@ class DownloadEngine:
 
     async def _handle_flood(self, seconds: int) -> None:
         """Attende il FloodWait richiesto da Telegram, con backoff esponenziale se si ripete."""
-        if not self._flood_free.is_set():  # un altro download sta già aspettando
-            await self._flood_free.wait()
+        gate = self._flood
+        if gate.left() > 0:  # un altro download (anche di un'altra chat) sta già aspettando
+            await self._wait_flood(report=False)
             return
-        self._flood_free.clear()
-        self._flood_streak += 1
-        wait = seconds + min(2 ** self._flood_streak, 300)
+        gate.streak += 1
+        wait = seconds + min(2 ** gate.streak, 300)
+        gate.until = time.monotonic() + wait
         self.l.log("warning", tr("Limite di Telegram (FloodWait): pausa di {seconds} secondi", seconds=wait))
+        await self._wait_flood(report=True)
+
+    async def _wait_flood(self, report: bool) -> None:
+        """report: mostra il conto alla rovescia (solo chi ha ricevuto il FloodWait, gli altri aspettano e basta)."""
         try:
-            end = time.monotonic() + wait
-            while not self._cancelled and (left := end - time.monotonic()) > 0:
-                self.l.flood_wait(int(left + 0.999))
+            while (left := self._flood.left()) > 0:
+                if self._cancelled:
+                    raise Cancelled
+                if report:
+                    self.l.flood_wait(int(left + 0.999))
                 await asyncio.sleep(min(1.0, left))
         finally:
-            self.l.flood_wait(0)
-            self._flood_free.set()
+            if report:
+                self.l.flood_wait(0)
 
     # ---- esecuzione ------------------------------------------------------
 
@@ -260,15 +343,20 @@ class DownloadEngine:
         self._opts = opts
         summary = Summary()
         chat_id = utils.get_peer_id(opts.entity)
-        self._parallel = parallel = max(1, min(MAX_PARALLEL, opts.parallel))
+        if not self._shared_slots:  # se condivisi, il limite lo decide chi li ha creati
+            self._slots.limit = max(1, min(MAX_PARALLEL, opts.parallel))
+        parallel = self._slots.limit
         queue: asyncio.Queue[DownloadItem | None] = asyncio.Queue()
-        # sempre MAX_PARALLEL worker: quanti lavorano davvero lo decide _parallel (vedi _take_slot)
+        # sempre MAX_PARALLEL worker: quanti lavorano davvero lo decide il limite degli slot (vedi _take_slot)
         workers = [asyncio.create_task(self._worker(queue, summary)) for _ in range(MAX_PARALLEL)]
+        requeue: asyncio.Task | None = None
         try:
             after_id = 0
             if opts.resume_from_last:
                 after_id = self.db.last_msg_id(chat_id)
-                await self._requeue_pending(opts, chat_id, summary, queue)
+                # i sospesi possono essere decine di migliaia: si rimettono in coda poco alla volta,
+                # intanto si controllano i messaggi nuovi
+                requeue = asyncio.create_task(self._requeue_pending(opts, chat_id, summary, queue))
             if after_id:
                 self.l.log("info", tr("«{source}»: controllo dei messaggi arrivati dopo l'ultimo visto",
                                        source=opts.source_name))
@@ -278,6 +366,8 @@ class DownloadEngine:
             await self._scan(opts, chat_id, summary, queue, after_id)
             if opts.follow:
                 await self._follow(opts, chat_id, summary, queue)
+            elif requeue:
+                await requeue  # batch: finisce dopo aver rimesso in coda tutti i sospesi
         except Cancelled:
             pass
         except Exception as e:
@@ -285,6 +375,9 @@ class DownloadEngine:
             self.l.log("error", tr("Analisi interrotta ({error}): completo i {n} file già in coda",
                                     error=e, n=summary.queued))
         finally:
+            if requeue and not requeue.done():
+                requeue.cancel()
+                await asyncio.gather(requeue, return_exceptions=True)
             for _ in workers:
                 queue.put_nowait(None)  # segnale di fine coda per ogni worker
         for result in await asyncio.gather(*workers, return_exceptions=True):
@@ -296,18 +389,22 @@ class DownloadEngine:
 
     async def _worker(self, queue: asyncio.Queue, summary: Summary) -> None:
         while True:
-            await self._take_slot()
+            # prima il file, poi lo slot: un worker senza lavoro non deve tenere occupato uno slot
+            # (con le chat seguite gli slot sono condivisi e una chat ferma bloccherebbe le altre)
+            item = await queue.get()
+            if item is None or self._cancelled:
+                return
             try:
-                item = await queue.get()
-                if item is None or self._cancelled:
-                    return
-                try:
-                    await self._process(item, summary)
-                except Exception:  # un errore su un file non deve mai fermare gli altri download
-                    log.exception("Errore imprevisto su %s", item.name)
-                    self.l.log("error", tr("{name}: errore imprevisto, file saltato", name=item.name))
+                await self._take_slot()
+            except Cancelled:
+                return
+            try:
+                await self._process(item, summary)
+            except Exception:  # un errore su un file non deve mai fermare gli altri download
+                log.exception("Errore imprevisto su %s", item.name)
+                self.l.log("error", tr("{name}: errore imprevisto, file saltato", name=item.name))
             finally:
-                self._release_slot()
+                self._slots.release()
 
     def _enqueue(self, item: DownloadItem, summary: Summary, queue: asyncio.Queue) -> None:
         self._queued.add(item.key)
@@ -343,7 +440,7 @@ class DownloadEngine:
                             self.l.scan_progress(summary.scanned, summary.queued, False)
                 break
             except errors.FloodWaitError as e:
-                await self._handle_flood(e.seconds)
+                await self._scan_flood(e.seconds)
             except _TRANSIENT as e:
                 failures += 1
                 if failures >= MAX_ATTEMPTS:
@@ -365,27 +462,56 @@ class DownloadEngine:
 
     async def _requeue_pending(self, opts: JobOptions, chat_id: int, summary: Summary,
                                queue: asyncio.Queue) -> None:
-        """Rimette in coda i file trovati in passato ma mai completati (app chiusa, errori…)."""
+        """Rimette in coda i file trovati in passato ma mai completati (app chiusa, errori…).
+        Un blocco alla volta, solo quando la coda si sta svuotando: chiederli tutti insieme a Telegram
+        (anche 40.000) fa scattare i limiti e rallenta tutto."""
         ids = self.db.pending_msg_ids(chat_id)
         if not ids:
             return
-        found = 0
-        for start in range(0, len(ids), 100):
-            batch = ids[start:start + 100]
-            while True:
-                try:
-                    messages = await self.client.get_messages(opts.entity, ids=batch)
-                    break
-                except errors.FloodWaitError as e:
-                    await self._handle_flood(e.seconds)
-            for msg in messages:
-                if msg is not None:
-                    item = self._make_item(msg, chat_id, opts, summary)
-                    if item:
-                        found += 1
-                        self._enqueue(item, summary, queue)
-        if found:
-            self.l.log("info", tr("Ripresi {n} file rimasti in sospeso dall'ultima volta", n=found))
+        self.l.log("info", tr("{n} file rimasti in sospeso dall'ultima volta: li rimetto in coda poco alla volta",
+                               n=len(ids)))
+        self.requeue_left = len(ids)
+        try:
+            for start in range(0, len(ids), REQUEUE_BATCH):
+                while queue.qsize() > REQUEUE_LOW_WATER:
+                    await self._sleep(1)
+                await self._checkpoint()
+                batch = ids[start:start + REQUEUE_BATCH]
+                failures = 0
+                while True:
+                    try:
+                        messages = await self.client.get_messages(opts.entity, ids=batch)
+                        break
+                    except errors.FloodWaitError as e:
+                        await self._scan_flood(e.seconds)
+                    except _TRANSIENT as e:
+                        failures += 1
+                        if failures >= MAX_ATTEMPTS:
+                            raise
+                        await self._sleep(min(2 ** failures, 60))
+                self.requeue_left = len(ids) - start - len(batch)
+                for msg in messages:
+                    if msg is not None:
+                        item = self._make_item(msg, chat_id, opts, summary)
+                        if item:
+                            self._enqueue(item, summary, queue)
+        except Cancelled:
+            pass
+        except Exception as e:  # gira accanto all'analisi: l'errore non deve perdersi
+            log.exception("Ripresa dei file sospesi interrotta")
+            self.l.log("error", tr("Ripresa dei file in sospeso interrotta ({error}): riprovo al prossimo avvio",
+                                    error=e))
+        finally:
+            self.requeue_left = 0
+            self._emit_overall(force=True)
+
+    async def _scan_flood(self, seconds: int) -> None:
+        """FloodWait sulla lettura dei messaggi: aspetta solo l'analisi, i download continuano
+        (il limite di Telegram vale per il tipo di richiesta)."""
+        wait = seconds + 1
+        self.l.log("warning", tr("Analisi: Telegram chiede di rallentare, riprendo tra {seconds}s "
+                                 "(i download continuano)", seconds=wait))
+        await self._sleep(wait)
 
     async def _follow(self, opts: JobOptions, chat_id: int, summary: Summary, queue: asyncio.Queue) -> None:
         """Resta in ascolto: Telegram avvisa dei nuovi messaggi, più un controllo di sicurezza periodico."""
@@ -447,6 +573,14 @@ class DownloadEngine:
             ext = ".jpg"
         if opts.extensions and ext not in opts.extensions:
             return None
+        if opts.name_words:
+            # le foto non hanno un nome: per loro conta solo il testo del messaggio
+            text = f.name or ""
+            if opts.name_in_caption:
+                text += " " + (getattr(msg, "message", None) or "")
+            text = _fold(text)
+            if not any(word in text for word in opts.name_words):
+                return None
         size = f.size or 0
         if size < opts.min_size or (opts.max_size and size > opts.max_size):
             return None
@@ -509,7 +643,7 @@ class DownloadEngine:
         ok, duplicate, error, attempt = False, False, "", 0
         while attempt < MAX_ATTEMPTS:
             try:
-                await self._checkpoint()
+                await self._download_checkpoint()
                 duplicate = await self._transfer(item)
                 ok = True
                 break
@@ -546,14 +680,14 @@ class DownloadEngine:
                                          name=item.name, error=error, attempt=attempt + 1,
                                          max=MAX_ATTEMPTS, seconds=delay))
                 try:
-                    await self._sleep(delay)
+                    await self._sleep_without_slot(delay)
                 except Cancelled:
                     error = tr("annullato")
                     break
 
         if ok:
             self._done_files += 1
-            self._flood_streak = 0
+            self._flood.streak = 0
             if duplicate:
                 summary.skipped += 1
                 summary.duplicates += 1
@@ -632,7 +766,7 @@ class DownloadEngine:
                         break
                     except asyncio.TimeoutError:
                         raise asyncio.TimeoutError(tr("nessun dato da {seconds} secondi", seconds=CHUNK_TIMEOUT)) from None
-                    await self._checkpoint()
+                    await self._download_checkpoint()
                     chunk = chunk[:item.size - item.done]
                     f.write(chunk)
                     self._set_done(item, item.done + len(chunk))

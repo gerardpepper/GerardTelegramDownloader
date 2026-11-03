@@ -2,10 +2,13 @@
 
 import asyncio
 import logging
+from typing import Callable
 
-from PyQt6.QtCore import QPointF, Qt
+from PyQt6.QtCore import QPointF, QRectF, Qt
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QCheckBox, QMessageBox, QWidget
+
+from ..i18n import tr
 
 log = logging.getLogger(__name__)
 _tasks: set[asyncio.Task] = set()
@@ -44,6 +47,64 @@ def app_icon() -> QIcon:
         p.end()
         icon.addPixmap(pm)
     return icon
+
+
+def confirm(parent: QWidget, title: str, text: str, yes: str, checkbox: QCheckBox | None = None) -> bool:
+    """Domanda con pulsanti nella lingua dell'app (Yes/No standard di Qt restano in inglese)."""
+    box = QMessageBox(QMessageBox.Icon.Question, title, text, parent=parent)
+    ok = box.addButton(yes, QMessageBox.ButtonRole.AcceptRole)
+    box.addButton(tr("Annulla"), QMessageBox.ButtonRole.RejectRole)
+    box.setDefaultButton(ok)
+    if checkbox is not None:
+        box.setCheckBox(checkbox)
+    box.exec()
+    return box.clickedButton() is ok
+
+
+def _drawn_icon(color: QColor, draw: Callable[[QPainter], None]) -> QIcon:
+    """Icona disegnata su una griglia 24×24 (l'app non ha file di immagini); disabilitata la ingrigisce Qt."""
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48):
+        pm = QPixmap(size, size)
+        pm.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.scale(size / 24, size / 24)
+        p.setPen(QPen(color, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(color)
+        draw(p)
+        p.end()
+        icon.addPixmap(pm)
+    return icon
+
+
+def logout_icon(color: QColor) -> QIcon:
+    """Porta aperta con freccia verso l'esterno."""
+    def draw(p: QPainter) -> None:
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPolyline([QPointF(13, 7), QPointF(13, 4), QPointF(4, 4), QPointF(4, 20), QPointF(13, 20), QPointF(13, 17)])
+        p.drawLine(QPointF(9, 12), QPointF(21, 12))
+        p.drawPolyline([QPointF(17, 8), QPointF(21, 12), QPointF(17, 16)])
+    return _drawn_icon(color, draw)
+
+
+# colori fissi, leggibili sia con il tema chiaro sia con quello scuro
+PLAY_COLOR, PAUSE_COLOR, STOP_COLOR = QColor("#2e9d4a"), QColor("#d08700"), QColor("#d03030")
+
+
+def play_icon() -> QIcon:
+    return _drawn_icon(PLAY_COLOR, lambda p: p.drawPolygon([QPointF(7, 4), QPointF(20, 12), QPointF(7, 20)]))
+
+
+def pause_icon() -> QIcon:
+    def draw(p: QPainter) -> None:
+        p.drawRoundedRect(QRectF(6, 4, 4, 16), 1, 1)
+        p.drawRoundedRect(QRectF(14, 4, 4, 16), 1, 1)
+    return _drawn_icon(PAUSE_COLOR, draw)
+
+
+def stop_icon() -> QIcon:
+    return _drawn_icon(STOP_COLOR, lambda p: p.drawRoundedRect(QRectF(5, 5, 14, 14), 2, 2))
 
 
 def _dark_palette() -> QPalette:

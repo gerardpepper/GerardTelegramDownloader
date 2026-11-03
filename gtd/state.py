@@ -79,7 +79,8 @@ class StateDB:
 
     def pending_msg_ids(self, chat_id: int) -> list[int]:
         return [row["msg_id"] for row in self.conn.execute(
-            "SELECT msg_id FROM downloads WHERE chat_id=? AND status IN ('pending','partial','failed') ORDER BY msg_id",
+            "SELECT msg_id FROM downloads WHERE chat_id=? AND status IN ('pending','partial','failed')"
+            " ORDER BY status = 'failed', msg_id",  # quelli già falliti per ultimi
             (chat_id,))]
 
     def set_progress(self, chat_id: int, msg_id: int, downloaded: int) -> None:

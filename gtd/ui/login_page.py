@@ -17,12 +17,22 @@ from .common import spawn
 if TYPE_CHECKING:
     from .main_window import MainWindow
 
-_INTRO = N_(
-    "Per usare l'app servono le <b>chiavi API</b> personali di Telegram (si creano una volta sola):<br>"
-    "1. apri <a href='https://my.telegram.org/apps'>my.telegram.org/apps</a> e accedi con il tuo numero;<br>"
-    "2. compila il modulo «Create new application» (titolo e nome breve a piacere, piattaforma <i>Desktop</i>);<br>"
-    "3. copia qui sotto <b>App api_id</b> e <b>App api_hash</b>.<br>"
-    "Le chiavi e la sessione restano solo su questo PC, cifrate con il tuo utente Windows."
+# mostrata nella pagina di accesso e nel menu «? → Guida»
+API_GUIDE = N_(
+    "Per usare l'app servono le <b>chiavi API</b> personali di Telegram. Non riguardano un canale: "
+    "servono all'app per entrare nel <i>tuo</i> account. Si creano una volta sola, in pochi minuti:<br><br>"
+    "1. apri <a href='https://my.telegram.org/apps'>my.telegram.org/apps</a> nel browser e scrivi il tuo "
+    "numero con prefisso (es. +393331234567);<br>"
+    "2. Telegram ti manda un codice <b>dentro l'app Telegram</b> (chat «Telegram», non per SMS): "
+    "scrivilo nel sito;<br>"
+    "3. compila il modulo «Create new application»: <i>App title</i> e <i>Short name</i> a piacere "
+    "(il nome breve: 5–32 lettere o numeri), <i>Platform</i> Desktop, il resto può restare vuoto;<br>"
+    "4. premi «Create application» e copia qui <b>App api_id</b> (un numero) e <b>App api_hash</b> "
+    "(32 caratteri);<br>"
+    "5. premi «Salva e continua», poi inserisci il tuo numero: per accedere riceverai un altro codice "
+    "nell'app Telegram.<br><br>"
+    "Le chiavi e la sessione restano solo su questo PC, cifrate con il tuo utente Windows. "
+    "Non condividere mai l'api_hash. Dal secondo avvio l'accesso è automatico."
 )
 
 
@@ -98,7 +108,7 @@ class LoginPage(QWidget):
 
     def retranslate(self) -> None:
         self.box.setTitle(tr("Accesso a Telegram"))
-        self.intro.setText(tr(_INTRO))
+        self.intro.setText(tr(API_GUIDE))
         self.api_id.setPlaceholderText(tr("es. 1234567"))
         self.api_hash.setPlaceholderText(tr("32 caratteri esadecimali"))
         self.api_btn.setText(tr("Salva e continua"))

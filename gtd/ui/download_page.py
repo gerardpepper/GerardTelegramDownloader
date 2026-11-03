@@ -14,20 +14,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFormLayout, QGridLayout,
-                             QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPlainTextEdit,
+                             QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
                              QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget,
                              QTableWidgetItem, QVBoxLayout, QWidget)
 from telethon import errors, utils
 from telethon.tl.functions.messages import CheckChatInviteRequest
 from telethon.tl.types import ChatInviteAlready, ChatInvitePeek, PeerChannel
 
-from ..engine import MAX_PARALLEL, DownloadEngine, DownloadItem, JobOptions, Summary, human_eta, human_size
+from ..config import FollowedChat
+from ..engine import (MAX_PARALLEL, DownloadEngine, DownloadItem, JobOptions, Summary, human_eta, human_size,
+                      parse_name_filter)
 from ..i18n import N_, tr
 from ..power import keep_awake
 from .avatars import AvatarCache, initials_icon
-from .common import spawn
+from .common import confirm, spawn
+from .logpanel import LogPanel
 
 if TYPE_CHECKING:
     from .main_window import MainWindow
@@ -44,8 +46,26 @@ PRESETS = {
 DUPLICATE_POLICIES = [(N_("Salta se già presente"), "skip"), (N_("Rinomina (file_(1).ext)"), "rename"),
                       (N_("Sovrascrivi"), "overwrite")]
 MB = 1024 * 1024
-LOG_LIMIT = 20_000                     # righe conservate nel registro a video
-WARNING_LEVELS = ("skip", "warning")   # righe gialle, nascondibili con «Mostra avvisi»
+
+
+def extensions_from(presets: list[str], custom: str) -> set[str]:
+    """Estensioni scelte: quelle dei tipi spuntati più quelle scritte a mano («epub, .mobi»)."""
+    exts: set[str] = set()
+    for name in presets:
+        exts.update(PRESETS.get(name, []))
+    for token in re.split(r"[,;\s]+", custom):
+        token = token.strip().lower()
+        if token:
+            exts.add(token if token.startswith(".") else "." + token)
+    return exts
+
+
+def filter_text(exts: set[str], name_filter: str) -> str:
+    """Riassunto dei filtri a parole, per il registro e per la scheda «Segui»."""
+    text = tr("solo {extensions}", extensions=", ".join(sorted(exts))) if exts else tr("tutti i tipi")
+    if name_filter.strip():
+        text += " · " + tr("nome con «{words}»", words=name_filter.strip())
+    return text
 
 
 class DownloadPage(QWidget):
@@ -55,9 +75,9 @@ class DownloadPage(QWidget):
         self.client = None
         self.me = None
         self.engine: DownloadEngine | None = None
+        self.job_peer_id = 0  # chat del batch in corso: non la si può seguire contemporaneamente
+        self._job_task: asyncio.Task | None = None
         self._scanning = False
-        self._following = False
-        self._log_lines: deque[tuple[bool, str]] = deque(maxlen=LOG_LIMIT)
         self._flood_active = False
         self._speed_samples: deque[tuple[float, int]] = deque(maxlen=200)
         self._totals = (0, 0, 0, 0)
@@ -86,9 +106,6 @@ class DownloadPage(QWidget):
         left = QWidget()
         lv = QVBoxLayout(left)
 
-        self.account_label = QLabel()
-        lv.addWidget(self.account_label)
-
         g_src = QGroupBox()
         self._t(g_src.setTitle, "Sorgente")
         fs = QFormLayout(g_src)
@@ -106,7 +123,16 @@ class DownloadPage(QWidget):
         self._t(self.manual_edit.setPlaceholderText, "https://t.me/… oppure @username")
         self._t(self.manual_edit.setToolTip, "Se compilato ha la precedenza sulla chat selezionata sopra")
         self.manual_edit.setClearButtonEnabled(True)
-        fs.addRow(self._label("Link / @username:"), self.manual_edit)
+        self.follow_btn = QPushButton()
+        self._t(self.follow_btn.setText, "Segui questa chat…")
+        self._t(self.follow_btn.setToolTip,
+                "Aggiunge la chat alla scheda «Segui», con questa cartella e questi filtri:\n"
+                "l'app scaricherà i nuovi file appena arrivano.")
+        self.follow_btn.clicked.connect(self._on_follow)
+        row = QHBoxLayout()
+        row.addWidget(self.manual_edit, 1)
+        row.addWidget(self.follow_btn)
+        fs.addRow(self._label("Link / @username:"), row)
         lv.addWidget(g_src)
 
         g_dst = QGroupBox()
@@ -137,6 +163,20 @@ class DownloadPage(QWidget):
         self._t(self.custom_ext.setPlaceholderText, "es. .epub oppure .epub, .mobi")
         self.custom_ext.textChanged.connect(self._update_filter_summary)
         ff.addRow(self._label("Estensioni:"), self.custom_ext)
+        self.name_edit = QLineEdit()
+        self.name_edit.setClearButtonEnabled(True)
+        self._t(self.name_edit.setPlaceholderText, "es. fattura oppure preventivo, offerta")
+        self._t(self.name_edit.setToolTip,
+                "Scarica solo i file che contengono una di queste parole (separate da virgola).\n"
+                "Maiuscole e accenti non contano. Vuoto = qualsiasi nome.")
+        self.name_edit.textChanged.connect(self._update_filter_summary)
+        ff.addRow(self._label("Nome contiene:"), self.name_edit)
+        self.caption_chk = QCheckBox()
+        self._t(self.caption_chk.setText, "cerca le parole anche nel testo del messaggio")
+        self._t(self.caption_chk.setToolTip,
+                "Utile per le foto, che non hanno un nome, e per i canali che descrivono il file nel messaggio")
+        self.caption_chk.toggled.connect(self._update_filter_summary)
+        ff.addRow("", self.caption_chk)
         self.filter_summary = QLabel()
         self.filter_summary.setWordWrap(True)
         ff.addRow(self._label("Scarico:"), self.filter_summary)
@@ -177,18 +217,12 @@ class DownloadPage(QWidget):
         fo.addRow(self._label("Download paralleli:"), self.parallel_spin)
         self.dedupe_chk = QCheckBox()
         self._t(self.dedupe_chk.setText, "Salta i doppioni (stesso file ripubblicato con un altro nome)")
-        self.follow_chk = QCheckBox()
-        self._t(self.follow_chk.setText, "Continua a seguire la chat: scarica i nuovi file appena arrivano")
-        self._t(self.follow_chk.setToolTip,
-                "Dopo aver scaricato tutto resta in ascolto finché non premi «Smetti di seguire».\n"
-                "Se chiudi l'app, alla riapertura riprende da sola recuperando i file arrivati.")
         self.notify_chk = QCheckBox()
         self._t(self.notify_chk.setText, "Notifiche di Windows (fine batch, errori, nuovi file)")
         self.shutdown_chk = QCheckBox()
         self._t(self.shutdown_chk.setText, "Spegni il PC al termine")
-        for cb in (self.dedupe_chk, self.follow_chk, self.notify_chk, self.shutdown_chk):
+        for cb in (self.dedupe_chk, self.notify_chk, self.shutdown_chk):
             fo.addRow("", cb)
-        self.follow_chk.toggled.connect(self._on_follow_toggled)
         lv.addWidget(g_opt)
 
         buttons = QHBoxLayout()
@@ -245,17 +279,9 @@ class DownloadPage(QWidget):
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         rv.addWidget(self.table)
 
-        log_header = QHBoxLayout()
-        log_header.addWidget(self._label("Registro"))
-        log_header.addStretch(1)
-        self.warnings_chk = QCheckBox()
-        self._t(self.warnings_chk.setText, "Mostra avvisi (righe gialle: file saltati, tentativi…)")
-        self.warnings_chk.toggled.connect(self._rebuild_log)
-        log_header.addWidget(self.warnings_chk)
-        rv.addLayout(log_header)
-        self.log_view = QPlainTextEdit(readOnly=True)
-        self.log_view.setMaximumBlockCount(LOG_LIMIT)
-        rv.addWidget(self.log_view, 1)
+        self.log_panel = LogPanel()
+        self._texts.append(self.log_panel.retranslate)
+        rv.addWidget(self.log_panel, 1)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(scroll)
@@ -277,7 +303,6 @@ class DownloadPage(QWidget):
         for apply_text in self._texts:
             apply_text()
         self._update_filter_summary()
-        self._update_account_label()
         if not self.running:
             self.status_label.setText(tr("Pronto."))
         if self.chat_combo.count() and self.chat_combo.itemData(0) is None:
@@ -309,13 +334,18 @@ class DownloadPage(QWidget):
         needed = self._left.sizeHint().width() + self._scroll.verticalScrollBar().sizeHint().width() + 8
         self._scroll.setMinimumWidth(max(460, needed))
 
+    def missing_height(self) -> int:
+        """Pixel che mancano perché le impostazioni stiano tutte senza barra di scorrimento."""
+        self._left.layout().activate()
+        return max(0, self._left.minimumSizeHint().height() - self._scroll.viewport().height())
+
     def _retranslate_dup_combo(self) -> None:
         for i, (label, _value) in enumerate(DUPLICATE_POLICIES):
             self.dup_combo.setItemText(i, tr(label))
 
     def _retranslate_job_buttons(self) -> None:
         self.pause_btn.setText(tr("Riprendi") if self.engine and self.engine.paused else tr("Pausa"))
-        self.cancel_btn.setText(tr("Smetti di seguire") if self._following else tr("Annulla"))
+        self.cancel_btn.setText(tr("Annulla"))
 
     # ---- impostazioni ----------------------------------------------------
 
@@ -326,6 +356,8 @@ class DownloadPage(QWidget):
         for name, cb in self.preset_checks.items():
             cb.setChecked(name in s.presets)
         self.custom_ext.setText(s.custom_extensions)
+        self.name_edit.setText(s.name_filter)
+        self.caption_chk.setChecked(s.name_in_caption)
         self._update_filter_summary()
         self.min_size.setValue(s.min_size_mb)
         self.max_size.setValue(s.max_size_mb)
@@ -338,8 +370,7 @@ class DownloadPage(QWidget):
         self._fit_table_height()
         self.notify_chk.setChecked(s.notifications)
         self.dedupe_chk.setChecked(s.skip_duplicates)
-        self.follow_chk.setChecked(s.follow)
-        self.warnings_chk.setChecked(s.show_warnings)
+        self.log_panel.warnings_chk.setChecked(s.show_warnings)
 
     def save_settings(self) -> None:
         s = self.win.settings
@@ -350,6 +381,8 @@ class DownloadPage(QWidget):
             s.last_source_id = utils.get_peer_id(entity)
         s.presets = [n for n, cb in self.preset_checks.items() if cb.isChecked()]
         s.custom_extensions = self.custom_ext.text().strip()
+        s.name_filter = self.name_edit.text().strip()
+        s.name_in_caption = self.caption_chk.isChecked()
         s.min_size_mb = self.min_size.value()
         s.max_size_mb = self.max_size.value()
         s.duplicate_policy = self.dup_combo.currentData()
@@ -359,46 +392,41 @@ class DownloadPage(QWidget):
         s.parallel = self.parallel_spin.value()
         s.notifications = self.notify_chk.isChecked()
         s.skip_duplicates = self.dedupe_chk.isChecked()
-        s.follow = self.follow_chk.isChecked()
-        s.show_warnings = self.warnings_chk.isChecked()
+        s.show_warnings = self.log_panel.warnings_chk.isChecked()
         s.save()
 
     def _update_filter_summary(self) -> None:
         if not hasattr(self, "filter_summary"):
             return
         exts = self._selected_extensions()
-        if exts:
-            self.filter_summary.setText("<b>" + tr("solo {extensions}", extensions=", ".join(sorted(exts))) + "</b>")
+        words = self.name_edit.text().strip()
+        if exts or words:
+            self.filter_summary.setText("<b>" + html.escape(filter_text(exts, words)) + "</b>")
             self.filter_summary.setStyleSheet("")
         else:
             self.filter_summary.setText(tr("<b>tutti i tipi di file</b> (nessun tipo selezionato)"))
             self.filter_summary.setStyleSheet("color: #d08700;")
 
     def _selected_extensions(self) -> set[str]:
-        exts: set[str] = set()
-        for name, cb in self.preset_checks.items():
-            if cb.isChecked():
-                exts.update(PRESETS[name])
-        for token in re.split(r"[,;\s]+", self.custom_ext.text()):
-            token = token.strip().lower()
-            if token:
-                exts.add(token if token.startswith(".") else "." + token)
-        return exts
+        return extensions_from([n for n, cb in self.preset_checks.items() if cb.isChecked()], self.custom_ext.text())
 
     # ---- account e chat --------------------------------------------------
 
     def activate(self, client, me) -> None:
         self.client = client
         self.me = me
-        self._update_account_label()
         self.log("info", tr("Accesso effettuato come {name}", name=utils.get_display_name(me) or tr("utente")))
 
-    def _update_account_label(self) -> None:
-        if not self.me:
-            return
-        who = utils.get_display_name(self.me) or tr("utente")
-        phone = f" (+{self.me.phone})" if getattr(self.me, "phone", None) else ""
-        self.account_label.setText(tr("Connesso come {name}", name=f"<b>{html.escape(who)}</b>") + phone)
+    def chat_entries(self) -> list[tuple]:
+        """Le chat recenti già caricate (icona, testo, entità): servono anche alla scheda «Segui»."""
+        return [(self.chat_combo.itemIcon(i), self.chat_combo.itemText(i), self.chat_combo.itemData(i))
+                for i in range(self.chat_combo.count()) if self.chat_combo.itemData(i) is not None]
+
+    def entity_for(self, peer_id: int):
+        for _icon, _text, entity in self.chat_entries():
+            if utils.get_peer_id(entity) == peer_id:
+                return entity
+        return None
 
     async def refresh_dialogs(self) -> None:
         if not self.client:
@@ -463,7 +491,8 @@ class DownloadPage(QWidget):
 
         await asyncio.gather(*(one(i, e) for i, e in pending))
 
-    async def _resolve_source(self, manual: str):
+    async def resolve_source(self, manual: str):
+        """Link t.me / @username (vuoto = chat scelta nell'elenco) → entità. ValueError con un messaggio per l'utente."""
         if not manual:
             return self.chat_combo.currentData()
         try:
@@ -510,32 +539,27 @@ class DownloadPage(QWidget):
             QMessageBox.warning(self, tr("Destinazione non valida"),
                                 tr("Impossibile usare la cartella:\n{error}", error=e))
             return
-        if self.shutdown_chk.isChecked() and not self.follow_chk.isChecked():
-            answer = QMessageBox.question(
-                self, tr("Spegnimento automatico"),
-                tr("Al termine dei download il PC verrà spento (con 2 minuti di preavviso). Confermi?"))
-            if answer != QMessageBox.StandardButton.Yes:
+        if self.shutdown_chk.isChecked():
+            if not confirm(self, tr("Spegnimento automatico"),
+                           tr("Al termine dei download il PC verrà spento (con 2 minuti di preavviso). Confermi?"),
+                           tr("Conferma")):
                 self.shutdown_chk.setChecked(False)
         self.save_settings()
-        spawn(self._run_job(manual, Path(dest)))
+        self._job_task = spawn(self._run_job(manual, Path(dest)))
 
-    def _on_follow_toggled(self, checked: bool) -> None:
-        # seguendo una chat il batch non finisce mai: lo spegnimento automatico non ha senso
-        if checked:
-            self.shutdown_chk.setChecked(False)
-        self.shutdown_chk.setEnabled(not checked and not self.running)
-
-    def maybe_resume_follow(self) -> None:
-        """All'avvio: se l'app era in ascolto di una chat quando è stata chiusa, riprende da sola."""
-        s = self.win.settings
-        if not (s.follow and s.follow_resume) or self.running or not s.destination:
-            return
-        manual = s.last_manual_source
-        if not manual and self.chat_combo.currentData() is None:
-            self.log("warning", tr("Non trovo più la chat che stavi seguendo: selezionala e premi «Avvia download»"))
-            return
-        self.log("info", tr("Riprendo a seguire la chat (recupero dei file arrivati mentre l'app era chiusa)"))
-        spawn(self._run_job(manual, Path(s.destination), resume_from_last=True))
+    def _on_follow(self) -> None:
+        """Propone alla scheda «Segui» la chat scelta qui, con la stessa cartella e gli stessi filtri."""
+        manual = self.manual_edit.text().strip()
+        entity = None if manual else self.chat_combo.currentData()
+        chat = FollowedChat(
+            peer_id=utils.get_peer_id(entity) if entity is not None else 0,
+            source=manual, name=utils.get_display_name(entity) if entity is not None else "",
+            destination=self.dest_edit.text().strip(),
+            presets=[n for n, cb in self.preset_checks.items() if cb.isChecked()],
+            custom_extensions=self.custom_ext.text().strip(), name_filter=self.name_edit.text().strip(),
+            name_in_caption=self.caption_chk.isChecked(), folder_by_source=self.by_source.isChecked(),
+            folder_by_type=self.by_type.isChecked(), folder_by_date=self.by_date.isChecked())
+        self.win.follow_page.add_chat(chat)
 
     def _on_pause(self) -> None:
         if not self.engine:
@@ -551,12 +575,7 @@ class DownloadPage(QWidget):
 
     def _on_cancel(self) -> None:
         if self.engine:
-            if self._following:
-                self.log("info", tr("Smetto di seguire la chat"))
-            else:
-                self.log("warning", tr("Annullamento in corso… i file parziali verranno ripresi al prossimo avvio"))
-            self.win.settings.follow_resume = False  # fermato da te: al riavvio non riprende da sola
-            self.win.settings.save()
+            self.log("warning", tr("Annullamento in corso… i file parziali verranno ripresi al prossimo avvio"))
             self.engine.cancel()
             self.cancel_btn.setEnabled(False)
 
@@ -564,16 +583,22 @@ class DownloadPage(QWidget):
         if self.engine:
             self.engine.cancel()
 
+    async def stop(self) -> None:
+        """Annulla il batch in corso e aspetta che sia fermo (es. prima del logout)."""
+        if self.engine:
+            self.engine.cancel()
+        if self._job_task and not self._job_task.done():
+            await asyncio.wait([self._job_task])
+
     @property
     def running(self) -> bool:
-        return self.engine is not None
+        return self.engine is not None or self._scanning
 
-    async def _run_job(self, manual: str, dest: Path, resume_from_last: bool = False) -> None:
+    async def _run_job(self, manual: str, dest: Path) -> None:
         self._set_running(True)
         self.overall_bar.setValue(0)
         self.overall_label.clear()
         self._scanning = True
-        self._following = False
         self._speed_samples.clear()
         self._totals = (0, 0, 0, 0)
         self.status_label.setText(tr("Analisi della chat in corso…"))
@@ -581,26 +606,30 @@ class DownloadPage(QWidget):
         summary: Summary | None = None
         try:
             try:
-                entity = await self._resolve_source(manual)
+                entity = await self.resolve_source(manual)
             except ValueError as e:
                 self.log("error", str(e))
                 return
-            name = utils.get_display_name(entity) or str(utils.get_peer_id(entity))
+            peer_id = utils.get_peer_id(entity)
+            name = utils.get_display_name(entity) or str(peer_id)
+            if self.win.follow_page.is_following(peer_id):
+                self.log("error", tr("«{source}» è già seguita nella scheda «Segui», che ne scarica i file: "
+                                     "fermala con ■ se vuoi scaricarla da qui", source=name))
+                return
             opts = JobOptions(
                 entity=entity, source_name=name, destination=dest,
                 extensions=self._selected_extensions(),
+                name_words=parse_name_filter(self.name_edit.text()), name_in_caption=self.caption_chk.isChecked(),
                 min_size=self.min_size.value() * MB, max_size=self.max_size.value() * MB,
                 duplicate_policy=self.dup_combo.currentData(),
                 folder_by_source=self.by_source.isChecked(), folder_by_type=self.by_type.isChecked(),
                 folder_by_date=self.by_date.isChecked(), parallel=self.parallel_spin.value(),
-                skip_duplicates=self.dedupe_chk.isChecked(), follow=self.follow_chk.isChecked(),
-                resume_from_last=resume_from_last)
-            self.win.settings.follow_resume = opts.follow
-            self.win.settings.save()
-            filtro = ", ".join(sorted(opts.extensions)) if opts.extensions else tr("tutti i tipi")
-            self.log("info", tr("Avvio batch: «{source}» → {destination} (filtro: {filter})",
-                                source=name, destination=dest, filter=filtro))
-            self.engine = DownloadEngine(self.client, self.win.db, self)
+                skip_duplicates=self.dedupe_chk.isChecked())
+            self.log("info", tr("Avvio batch: «{source}» → {destination} (filtro: {filter})", source=name,
+                                destination=dest, filter=filter_text(opts.extensions, self.name_edit.text())))
+            self.job_peer_id = peer_id
+            # FloodWait condiviso con le chat seguite: il limite di Telegram vale per tutto l'account
+            self.engine = DownloadEngine(self.client, self.win.db, self, flood=self.win.follow_page.flood)
             self.win.set_progress_info(0, tr("Analisi della chat in corso…"), "waiting")
             summary = await self.engine.run(opts)
         except Exception as e:  # errore imprevisto: lo mostriamo invece di perderlo
@@ -612,6 +641,7 @@ class DownloadPage(QWidget):
         finally:
             keep_awake(False)
             self.engine = None
+            self.job_peer_id = 0
             self._scanning = False
             self.win.set_progress_info(None)
             self._set_running(False)
@@ -620,7 +650,6 @@ class DownloadPage(QWidget):
             self._rows.clear()
         if summary:
             self._report(summary)
-        self._following = False
         self._retranslate_job_buttons()
 
     def _report(self, s: Summary) -> None:
@@ -628,9 +657,9 @@ class DownloadPage(QWidget):
                   "{failed} non riusciti", completed=s.completed, size=human_size(s.downloaded_bytes),
                   skipped=s.skipped, duplicates=s.duplicates, failed=s.failed)
         if s.cancelled:
-            prefix = tr("Non segui più la chat.") if self._following else tr("Annullato.")
+            prefix = tr("Annullato.")
             self.status_label.setText(f"{prefix} {text}")
-            self.log("info" if self._following else "warning", f"{prefix} {text}")
+            self.log("warning", f"{prefix} {text}")
             return
         self.status_label.setText(f"{tr('Completato.')} {text}")
         self.log("success" if not s.failed else "warning", tr("Batch terminato: {summary}", summary=text))
@@ -656,61 +685,29 @@ class DownloadPage(QWidget):
     def _set_running(self, running: bool) -> None:
         for w in (self.chat_combo, self.refresh_btn, self.manual_edit, self.dest_edit, self.browse_btn,
                   self.custom_ext, self.min_size, self.max_size, self.dup_combo, self.by_source, self.by_type,
-                  self.by_date, self.parallel_spin, self.dedupe_chk, self.follow_chk, *self.preset_checks.values()):
+                  self.by_date, self.parallel_spin, self.dedupe_chk, self.name_edit, self.caption_chk,
+                  self.shutdown_chk, *self.preset_checks.values()):
             w.setEnabled(not running)
-        self.shutdown_chk.setEnabled(not running and not self.follow_chk.isChecked())
         self.start_btn.setEnabled(not running)
         self.pause_btn.setEnabled(running)
         self.cancel_btn.setEnabled(running)
         self._retranslate_job_buttons()
-        self.win.set_account_actions_enabled(not running)
 
     # ---- registro --------------------------------------------------------
 
     def log(self, level: str, text: str) -> None:
         """level: info | success | skip | warning | error. skip e warning sono le righe gialle «avvisi»."""
-        color = {"warning": "#d08700", "skip": "#d08700", "error": "#d03030", "success": "#2e9d4a"}.get(level)
-        body = html.escape(text)
-        if color:
-            body = f'<span style="color:{color}">{body}</span>'
-        stamp = datetime.now().strftime("%H:%M:%S")
-        line = f'<span style="color:gray">{stamp}</span>&nbsp; {body}'
-        is_warning = level in WARNING_LEVELS
-        self._log_lines.append((is_warning, line))
-        if not is_warning or self.warnings_chk.isChecked():
-            self.log_view.appendHtml(line)
+        self.log_panel.add(level, text)
         log.log({"warning": logging.WARNING, "error": logging.ERROR}.get(level, logging.INFO), text)
-
-    def _rebuild_log(self) -> None:
-        """Mostra o nasconde le righe gialle anche a posteriori: il registro le conserva comunque."""
-        show = self.warnings_chk.isChecked()
-        self.log_view.clear()
-        cursor = QTextCursor(self.log_view.document())
-        cursor.beginEditBlock()  # un solo aggiornamento a video: ~1 s anche con 20.000 righe
-        first = True
-        for is_warning, line in self._log_lines:
-            if is_warning and not show:
-                continue
-            if not first:
-                cursor.insertBlock()
-            cursor.setCharFormat(QTextCharFormat())  # il colore di una riga non deve passare alla successiva
-            cursor.insertHtml(line)
-            first = False
-        cursor.endEditBlock()
-        self.log_view.verticalScrollBar().setValue(self.log_view.verticalScrollBar().maximum())
 
     # ---- Listener del motore ---------------------------------------------
 
+    # i batch di questa scheda non seguono la chat (lo fa la scheda «Segui»): richiesti solo dal Listener
     def following(self, last_check: datetime) -> None:
-        self._following = True
-        self._scanning = False
-        self._retranslate_job_buttons()
-        self.status_label.setText(tr("In ascolto di nuovi file — ultimo controllo alle {time}. "
-                                     "I nuovi file vengono scaricati appena arrivano.", time=f"{last_check:%H:%M}"))
-        self._publish_info()
+        pass
 
     def new_files(self, count: int) -> None:
-        self._notify(tr("Nuovi file in arrivo"), tr("{n} nuovi file da scaricare", n=count))
+        pass
 
     def scan_progress(self, scanned: int, found: int, finished: bool) -> None:
         self._scanning = not finished
@@ -751,8 +748,6 @@ class DownloadPage(QWidget):
             text, bar_state = tr("In pausa"), "paused"
         elif self._flood_active:
             text, bar_state = tr("Attesa limite Telegram"), "paused"
-        elif self._following and done_files >= total_files:
-            text = tr("In ascolto di nuovi file")
         else:
             eta = human_eta((total_bytes - done_bytes) / speed if speed > 0 else None)
             text = tr("{speed} MB/s · mancano {eta}", speed=f"{speed / MB:.1f}", eta=eta)

@@ -31,6 +31,28 @@ def setup_logging() -> None:
 
 
 @dataclass
+class FollowedChat:
+    """Una chat della scheda «Segui», con le sue impostazioni."""
+    peer_id: int = 0
+    source: str = ""                # link / @username, se la chat è stata indicata così
+    name: str = ""
+    destination: str = ""
+    presets: list[str] = field(default_factory=list)
+    custom_extensions: str = ""
+    name_filter: str = ""
+    name_in_caption: bool = True
+    folder_by_source: bool = True
+    folder_by_type: bool = False
+    folder_by_date: bool = False
+    active: bool = True             # avviata (▶): la si segue, anche al prossimo avvio dell'app
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "FollowedChat":
+        known = {f.name for f in fields(cls)}
+        return cls(**{k: v for k, v in raw.items() if k in known})
+
+
+@dataclass
 class Settings:
     api_id: int = 0
     api_hash: str = ""  # su disco viene salvato cifrato con DPAPI
@@ -39,6 +61,8 @@ class Settings:
     last_manual_source: str = ""
     presets: list[str] = field(default_factory=list)
     custom_extensions: str = ""
+    name_filter: str = ""
+    name_in_caption: bool = True
     min_size_mb: int = 0
     max_size_mb: int = 0
     duplicate_policy: str = "skip"
@@ -48,8 +72,10 @@ class Settings:
     parallel: int = 2
     notifications: bool = True
     skip_duplicates: bool = True
-    follow: bool = False
-    follow_resume: bool = False  # al riavvio riprende a seguire la chat (era in ascolto quando l'app è stata chiusa)
+    followed: list[FollowedChat] = field(default_factory=list)
+    follow_parallel: int = 2  # download contemporanei di tutte le chat seguite insieme
+    follow_show_warnings: bool = True
+    confirm_close: bool = True  # alla chiusura con download in corso chiede conferma
     show_warnings: bool = True
     theme: str = "system"
     language: str = ""  # vuoto = lingua di Windows
@@ -64,8 +90,17 @@ class Settings:
             raw = json.loads(cls._path().read_text("utf-8"))
         except (OSError, ValueError):
             return cls()
-        known = {f.name for f in fields(cls)} - {"api_hash"}
+        known = {f.name for f in fields(cls)} - {"api_hash", "followed"}
         settings = cls(**{k: v for k, v in raw.items() if k in known})
+        settings.followed = [FollowedChat.from_dict(d) for d in raw.get("followed", [])]
+        if raw.get("follow") and (raw.get("last_source_id") or raw.get("last_manual_source")):
+            # versione precedente: si poteva seguire una sola chat, con le impostazioni della pagina Download
+            settings.followed.append(FollowedChat(
+                peer_id=settings.last_source_id, source=settings.last_manual_source,
+                destination=settings.destination, presets=list(settings.presets),
+                custom_extensions=settings.custom_extensions, folder_by_source=settings.folder_by_source,
+                folder_by_type=settings.folder_by_type, folder_by_date=settings.folder_by_date,
+                active=bool(raw.get("follow_resume"))))
         encrypted = raw.get("api_hash_enc", "")
         if encrypted:
             try:

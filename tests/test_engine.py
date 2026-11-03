@@ -15,15 +15,16 @@ from types import SimpleNamespace
 from telethon import errors
 from telethon.tl.types import MessageMediaDocument, PeerChannel
 
-from gtd.engine import CHUNK_SIZE, DownloadEngine, JobOptions
+from gtd.engine import CHUNK_SIZE, DownloadEngine, JobOptions, Slots, parse_name_filter
 from gtd.state import StateDB
 
 ENTITY = PeerChannel(42)
+OTHER = PeerChannel(43)
 
 
-def make_msg(msg_id: int, name: str, data: bytes, doc_id: int | None = None):
+def make_msg(msg_id: int, name: str, data: bytes, doc_id: int | None = None, caption: str = ""):
     return SimpleNamespace(
-        id=msg_id, media=MessageMediaDocument(), sticker=None, photo=None,
+        id=msg_id, media=MessageMediaDocument(), sticker=None, photo=None, message=caption,
         document=SimpleNamespace(data=data, id=doc_id if doc_id is not None else msg_id * 1000),
         file=SimpleNamespace(name=name, ext=os.path.splitext(name)[1], size=len(data)),
         date=datetime(2026, 10, 1, tzinfo=timezone.utc), peer_id=ENTITY)
@@ -161,6 +162,189 @@ class EngineTest(unittest.TestCase):
         s, _ = self.run_job(FakeClient(msgs), extensions={".epub"}, folder_by_source=False)
         self.assertEqual(s.completed, 2)
         self.assertEqual(sorted(p.name for p in self.dest.iterdir()), ["altro.epub", "romanzo.EPUB"])
+
+    def test_name_filter(self):
+        msgs = [make_msg(1, "Offerta_GIANFELICE_v2.pdf", b"a" * 50),
+                make_msg(2, "scan001.pdf", b"b" * 50, caption="Contratto di Gianfélice Rossi"),
+                make_msg(3, "altro.pdf", b"c" * 50, caption="niente"),
+                make_msg(4, "preventivo-mario.epub", b"d" * 50)]
+        self.assertEqual(parse_name_filter(" gianfelice , Preventivo Mario;"), ["gianfelice", "preventivo mario"])
+        s, _ = self.run_job(FakeClient(msgs), folder_by_source=False,
+                            name_words=parse_name_filter("gianfelice, preventivo mario"))
+        self.assertEqual(sorted(p.name for p in self.dest.iterdir()),
+                         ["Offerta_GIANFELICE_v2.pdf", "preventivo-mario.epub", "scan001.pdf"])
+        # senza la didascalia conta solo il nome del file; le estensioni si combinano con il nome
+        self.db.conn.execute("DELETE FROM downloads")
+        for p in self.dest.iterdir():
+            p.unlink()
+        self.run_job(FakeClient(msgs), folder_by_source=False, extensions={".pdf"},
+                     name_words=["gianfelice", "preventivo mario"], name_in_caption=False)
+        self.assertEqual([p.name for p in self.dest.iterdir()], ["Offerta_GIANFELICE_v2.pdf"])
+
+    def test_engines_share_slots(self):
+        """Chat seguite: i download contemporanei sono contati tutti insieme."""
+        def msgs(peer, start):
+            out = [make_msg(i, f"doc{i}.epub", os.urandom(800)) for i in range(start, start + 12)]
+            for m in out:
+                m.peer_id = peer
+            return out
+
+        clients = [FakeClient(msgs(ENTITY, 1)), FakeClient(msgs(OTHER, 100))]
+        active, peak = 0, 0
+        for client in clients:
+            original = client.iter_download
+
+            async def tracked(*args, _original=original, **kwargs):
+                nonlocal active, peak
+                active += 1
+                peak = max(peak, active)
+                try:
+                    await asyncio.sleep(0.05)
+                    async for chunk in _original(*args, **kwargs):
+                        yield chunk
+                finally:
+                    active -= 1
+
+            client.iter_download = tracked
+
+        async def scenario():
+            slots = Slots(3)
+            jobs = [DownloadEngine(c, self.db, Recorder(), slots=slots).run(
+                JobOptions(entity=e, source_name=str(e.channel_id), destination=self.dest, extensions=set()))
+                for c, e in zip(clients, (ENTITY, OTHER))]
+            return await asyncio.gather(*jobs)
+
+        results = asyncio.run(scenario())
+        self.assertEqual([s.completed for s in results], [12, 12])
+        self.assertEqual(peak, 3)
+
+    def test_paused_followed_chat_does_not_block_others(self):
+        """Pausa su una chat seguita: i suoi download fermi lasciano gli slot condivisi alle altre."""
+        slow = FakeClient([make_msg(i, f"lento{i}.epub", os.urandom(3 * CHUNK_SIZE)) for i in range(1, 4)])
+        original = slow.iter_download
+
+        async def slowly(*args, **kwargs):
+            async for chunk in original(*args, **kwargs):
+                await asyncio.sleep(0.2)
+                yield chunk
+
+        slow.iter_download = slowly
+        other = FakeClient([make_msg(i, f"doc{i}.epub", os.urandom(500)) for i in range(10, 15)])
+        for m in other.messages:
+            m.peer_id = OTHER
+
+        async def scenario():
+            slots = Slots(2)
+            paused = DownloadEngine(slow, self.db, Recorder(), slots=slots)
+            task = asyncio.create_task(paused.run(JobOptions(entity=ENTITY, source_name="A", destination=self.dest,
+                                                             extensions=set())))
+            await asyncio.sleep(0.3)   # i due slot sono occupati dai file lenti
+            paused.pause()
+            s = await asyncio.wait_for(DownloadEngine(other, self.db, Recorder(), slots=slots).run(
+                JobOptions(entity=OTHER, source_name="B", destination=self.dest, extensions=set())), 10)
+            self.assertLessEqual(slots.busy, 0)  # la chat in pausa non ha ripreso slot
+            paused.resume()
+            first = await asyncio.wait_for(task, 20)
+            return s, first
+
+        s, first = asyncio.run(scenario())
+        self.assertEqual((s.completed, first.completed), (5, 3))
+
+    def test_idle_followed_chat_does_not_block_others(self):
+        """Una chat in ascolto senza file da scaricare non deve tenere occupati gli slot condivisi."""
+        import gtd.engine as engine
+        engine.FOLLOW_GROUPING_DELAY = 0
+        idle = FakeClient([])
+        busy = FakeClient([make_msg(i, f"doc{i}.epub", os.urandom(500)) for i in range(1, 6)])
+        for m in busy.messages:
+            m.peer_id = OTHER
+
+        async def scenario():
+            slots = Slots(1)
+            follower = DownloadEngine(idle, self.db, Recorder(), slots=slots)
+            task = asyncio.create_task(follower.run(JobOptions(entity=ENTITY, source_name="A", destination=self.dest,
+                                                               extensions=set(), follow=True)))
+            while not idle.handlers:
+                await asyncio.sleep(0.02)
+            s = await asyncio.wait_for(DownloadEngine(busy, self.db, Recorder(), slots=slots).run(
+                JobOptions(entity=OTHER, source_name="B", destination=self.dest, extensions=set())), 10)
+            follower.cancel()
+            await asyncio.wait_for(task, 5)
+            return s
+
+        self.assertEqual(asyncio.run(scenario()).completed, 5)
+
+    def test_failing_file_does_not_hold_the_slot_while_waiting(self):
+        """Un file che continua a fallire, tra un tentativo e l'altro, lascia lavorare gli altri."""
+        import gtd.engine as engine
+        bad = make_msg(1, "difettoso.epub", b"x" * 100)
+        good = [make_msg(i, f"doc{i}.epub", os.urandom(100)) for i in range(2, 8)]
+        client = FakeClient([bad] + good)
+        original = client.iter_download
+        finished_while_bad_waits = []
+
+        async def flaky(document, **kwargs):
+            if document is bad.document:
+                finished_while_bad_waits.append(len(list(self.dest.rglob("doc*.epub"))))
+                raise asyncio.IncompleteReadError(b"x" * 758, 1347703872)  # la risposta «HTTP» di Telegram
+            async for chunk in original(document, **kwargs):
+                yield chunk
+
+        client.iter_download = flaky
+        old = engine.MAX_ATTEMPTS
+        engine.MAX_ATTEMPTS = 3
+        try:
+            s, _ = self.run_job(client, parallel=1)
+        finally:
+            engine.MAX_ATTEMPTS = old
+        self.assertEqual((s.completed, s.failed), (6, 1))
+        self.assertEqual(finished_while_bad_waits[0], 0)
+        self.assertGreater(finished_while_bad_waits[-1], 0)  # i buoni sono scesi mentre il difettoso aspettava
+
+    def test_pending_requeued_little_by_little_failed_last(self):
+        import gtd.engine as engine
+        chat = self._chat_id()
+        msgs = [make_msg(i, f"doc{i}.epub", os.urandom(50)) for i in range(1, 301)]
+        for m in msgs:
+            self.db.register(chat, m.id, m.file.name, self.dest / m.file.name, 50, m.document.id)
+        self.db.set_status(chat, 1, "failed")
+        self.db.set_last_msg_id(chat, 300)
+        self.db.commit()
+        self.assertEqual(self.db.pending_msg_ids(chat)[-1], 1)  # i falliti in fondo
+        client = FakeClient(msgs)
+        calls, original = [], client.get_messages
+
+        async def tracked(entity, ids):
+            calls.append(len(ids))
+            return await original(entity, ids)
+
+        client.get_messages = tracked
+        old = engine.REQUEUE_BATCH, engine.REQUEUE_LOW_WATER
+        engine.REQUEUE_BATCH, engine.REQUEUE_LOW_WATER = 50, 10
+        try:
+            s, _ = self.run_job(client, folder_by_source=False, resume_from_last=True)
+        finally:
+            engine.REQUEUE_BATCH, engine.REQUEUE_LOW_WATER = old
+        self.assertEqual(s.completed, 300)
+        self.assertEqual(calls, [50] * 6)
+
+    def test_scan_flood_does_not_stop_downloads(self):
+        client = FakeClient([make_msg(1, "a.epub", b"a" * 100)])
+        original = client.iter_messages
+        state = {"flooded": False}
+
+        async def flooding(entity, reverse=True, offset_id=0):
+            async for m in original(entity, reverse=reverse, offset_id=offset_id):
+                yield m
+            if not state["flooded"]:
+                state["flooded"] = True
+                raise errors.FloodWaitError(request=None, capture=1)
+
+        client.iter_messages = flooding
+        s, rec = self.run_job(client, folder_by_source=False)
+        self.assertEqual(s.completed, 1)
+        self.assertEqual(rec.floods, [])  # nessun blocco generale dei download
+        self.assertTrue(any("i download continuano" in t for _, t in rec.logs))
 
     def test_rename_and_overwrite_policies(self):
         folder = self.dest
