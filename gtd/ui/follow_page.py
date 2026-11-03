@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING
 from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                              QFormLayout, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox,
-                             QProgressBar, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QToolButton,
+                             QMenu, QProgressBar, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QToolButton,
                              QVBoxLayout, QWidget)
 from telethon import errors, utils
 
@@ -24,7 +24,7 @@ from ..engine import (MAX_PARALLEL, DownloadEngine, FloodGate, JobOptions, Slots
 from ..i18n import N_, tr
 from ..power import keep_awake
 from .common import confirm, pause_icon, play_icon, spawn, stop_icon
-from .download_page import MB, PRESETS, extensions_from, filter_text
+from .download_page import DUPLICATE_POLICIES, MB, PRESETS, extensions_from, filter_text
 from .logpanel import LogPanel
 
 if TYPE_CHECKING:
@@ -42,6 +42,12 @@ def _icon_button(icon, size: int) -> QToolButton:
     button.setIconSize(QSize(size, size))
     button.setAutoRaise(True)
     return button
+
+
+def _filters(chat: FollowedChat) -> tuple:
+    """Cosa decide quali file scaricare: se cambia, ha senso riguardare anche i messaggi vecchi."""
+    return (set(chat.presets), extensions_from([], chat.custom_extensions), parse_name_filter(chat.name_filter),
+            chat.name_in_caption)
 
 
 class FollowDialog(QDialog):
@@ -115,6 +121,16 @@ class FollowDialog(QDialog):
         folders.addStretch(1)
         form.addRow(tr("Sottocartelle:"), folders)
 
+        # come nella scheda Download
+        self.dup_combo = QComboBox()
+        for label, value in DUPLICATE_POLICIES:
+            self.dup_combo.addItem(tr(label), value)
+        self.dup_combo.setCurrentIndex(max(0, self.dup_combo.findData(chat.duplicate_policy)))
+        form.addRow(tr("File già esistenti:"), self.dup_combo)
+        self.dedupe_chk = QCheckBox(tr("Salta i doppioni (stesso file ripubblicato con un altro nome)"))
+        self.dedupe_chk.setChecked(chat.skip_duplicates)
+        form.addRow("", self.dedupe_chk)
+
         self.history_chk = QCheckBox(tr("Scarica anche i file già presenti nella chat"))
         self.history_chk.setToolTip(tr("Senza spunta vengono scaricati solo i file che arrivano da adesso in poi"))
         if not editing:
@@ -160,6 +176,8 @@ class FollowDialog(QDialog):
         self.chat.folder_by_source = self.by_source.isChecked()
         self.chat.folder_by_type = self.by_type.isChecked()
         self.chat.folder_by_date = self.by_date.isChecked()
+        self.chat.duplicate_policy = self.dup_combo.currentData()
+        self.chat.skip_duplicates = self.dedupe_chk.isChecked()
         self.accept()
 
     def _fail(self, text: str) -> None:
@@ -283,9 +301,10 @@ class FollowPage(QWidget):
         self.add_btn = QPushButton()
         self.edit_btn = QPushButton()
         self.remove_btn = QPushButton()
+        self.rescan_btn = QPushButton()
         self.start_all_btn = _icon_button(play_icon(), 22)
         self.stop_all_btn = _icon_button(stop_icon(), 22)
-        for b in (self.add_btn, self.edit_btn, self.remove_btn):
+        for b in (self.add_btn, self.edit_btn, self.remove_btn, self.rescan_btn):
             bar.addWidget(b)
         bar.addSpacing(16)
         bar.addWidget(self.start_all_btn)
@@ -350,6 +369,9 @@ class FollowPage(QWidget):
         self.add_btn.clicked.connect(lambda: self.add_chat(FollowedChat(destination=self.win.settings.destination)))
         self.edit_btn.clicked.connect(self._on_edit)
         self.remove_btn.clicked.connect(self._on_remove)
+        self.rescan_btn.clicked.connect(lambda: self._on_rescan(self._selected()))
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
         self.start_all_btn.clicked.connect(self._on_start_all)
         self.stop_all_btn.clicked.connect(self._on_stop_all)
         self.table.itemDoubleClicked.connect(lambda _item: self._on_edit())
@@ -364,6 +386,9 @@ class FollowPage(QWidget):
         self.add_btn.setText(tr("Aggiungi chat…"))
         self.edit_btn.setText(tr("Modifica…"))
         self.remove_btn.setText(tr("Rimuovi"))
+        self.rescan_btn.setText(tr("Ricontrolla da capo…"))
+        self.rescan_btn.setToolTip(tr("Rilegge tutta la chat dall'inizio e scarica i file che mancano\n"
+                                      "(o tutti, se la chat è impostata per sovrascrivere i file già esistenti)"))
         self.start_all_btn.setToolTip(tr("Avvia tutte"))
         self.stop_all_btn.setToolTip(tr("Ferma tutte"))
         self.files.setHorizontalHeaderLabels([tr(c) for c in self.FILE_COLUMNS])
@@ -475,6 +500,7 @@ class FollowPage(QWidget):
         chat = self._selected()
         self.edit_btn.setEnabled(chat is not None)
         self.remove_btn.setEnabled(chat is not None)
+        self.rescan_btn.setEnabled(chat is not None)
         chats = self.win.settings.followed
         paused = any(run.paused for run in self._runs.values())
         self.start_all_btn.setEnabled(paused or any(not c.active for c in chats))
@@ -508,19 +534,78 @@ class FollowPage(QWidget):
         draft = replace(chat, presets=list(chat.presets))
         if FollowDialog(self, self, draft, editing=True).exec() != QDialog.DialogCode.Accepted:
             return
-        spawn(self._apply_edit(chat, draft))
+        rescan = False
+        if _filters(draft) != _filters(chat):
+            # di solito i filtri valgono solo per i messaggi nuovi: chi li cambia spesso li vuole anche sui vecchi
+            rescan = confirm(self, tr("Filtri cambiati"),
+                             tr("Applicare i nuovi filtri anche ai messaggi già arrivati in «{source}»?\n"
+                                "L'app rilegge la chat dall'inizio e scarica i file che ora corrispondono; "
+                                "quelli già scaricati vengono saltati.", source=chat.name or chat.source),
+                             tr("Sì, ricontrolla la chat"), no=tr("Solo ai messaggi nuovi"))
+        spawn(self._apply_edit(chat, draft, rescan))
 
-    async def _apply_edit(self, chat: FollowedChat, draft: FollowedChat) -> None:
+    async def _apply_edit(self, chat: FollowedChat, draft: FollowedChat, rescan: bool) -> None:
         was_running = id(chat) in self._runs
         await self._stop(chat)
         for name in ("destination", "presets", "custom_extensions", "name_filter", "name_in_caption",
-                     "folder_by_source", "folder_by_type", "folder_by_date"):
+                     "folder_by_source", "folder_by_type", "folder_by_date", "duplicate_policy", "skip_duplicates"):
             setattr(chat, name, getattr(draft, name))
-        self.win.settings.save()
         self.log("info", tr("Impostazioni aggiornate"), chat.name)
-        if was_running and chat.active:
-            self._start(chat)
+        if rescan:
+            self._begin_rescan(chat)
+        else:
+            self.win.settings.save()
+            if was_running and chat.active:
+                self._start(chat)
         self._fill_table()
+
+    def _on_rescan(self, chat: FollowedChat | None) -> None:
+        if chat is None:
+            return
+        source = chat.name or chat.source
+        if chat.duplicate_policy == "overwrite":
+            text = tr("Rileggo tutta «{source}» dall'inizio e riscarico TUTTI i file che corrispondono ai filtri, "
+                      "sovrascrivendo quelli già presenti nella cartella.\n"
+                      "Su una chat grande può richiedere molto tempo.", source=source)
+        else:
+            text = tr("Rileggo tutta «{source}» dall'inizio e scarico solo i file che mancano: quelli cancellati "
+                      "o spostati dalla cartella e quelli che rientrano nei filtri ma non erano stati scaricati.\n"
+                      "I file già presenti vengono saltati. Su una chat grande la lettura richiede qualche minuto.",
+                      source=source)
+        if confirm(self, tr("Ricontrolla da capo"), text, tr("Ricontrolla")):
+            spawn(self._rescan(chat))
+
+    async def _rescan(self, chat: FollowedChat) -> None:
+        await self._stop(chat)
+        self._begin_rescan(chat)
+        self._fill_table()
+
+    def _begin_rescan(self, chat: FollowedChat) -> None:
+        """Un giro di lettura completa della chat, poi di nuovo in ascolto come sempre."""
+        chat.active = True
+        self.win.settings.save()
+        self.log("info", tr("Ricontrollo la chat da capo"), chat.name)
+        self._start(chat, with_history=True)
+
+    def _on_context_menu(self, pos) -> None:
+        row = self.table.rowAt(pos.y())
+        chats = self.win.settings.followed
+        if not 0 <= row < len(chats):
+            return
+        self.table.selectRow(row)
+        chat = chats[row]
+        run = self._runs.get(id(chat))
+        menu = QMenu(self)
+        if run:
+            menu.addAction(play_icon() if run.paused else pause_icon(),
+                           tr("Riprendi") if run.paused else tr("Pausa"), lambda: self._toggle_pause(chat))
+        menu.addAction(stop_icon() if chat.active else play_icon(), tr("Ferma") if chat.active else tr("Avvia"),
+                       lambda: self._set_active(chat, not chat.active))
+        menu.addSeparator()
+        menu.addAction(tr("Ricontrolla da capo…"), lambda: self._on_rescan(chat))
+        menu.addAction(tr("Modifica…"), self._on_edit)
+        menu.addAction(tr("Rimuovi"), self._on_remove)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _on_remove(self) -> None:
         chat = self._selected()
@@ -704,6 +789,7 @@ class FollowPage(QWidget):
             name_words=parse_name_filter(chat.name_filter), name_in_caption=chat.name_in_caption,
             folder_by_source=chat.folder_by_source, folder_by_type=chat.folder_by_type,
             folder_by_date=chat.folder_by_date, parallel=self.slots.limit,
+            duplicate_policy=chat.duplicate_policy, skip_duplicates=chat.skip_duplicates,
             follow=True, resume_from_last=not full_scan)
         run.engine = DownloadEngine(self.client, self.win.db, run, slots=self.slots, flood=self.flood)
         if run.stopping:  # fermata mentre si risolveva la chat

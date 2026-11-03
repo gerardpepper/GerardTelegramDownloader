@@ -69,14 +69,22 @@ l'app resta in ascolto, Telegram la avvisa dei nuovi messaggi e i file vengono s
   già impostati lì). Puoi scegliere se scaricare anche i file già presenti o solo quelli in arrivo da adesso.
 - Su ogni riga: **⏸** mette in pausa per un momento, **■ / ▶** smette di seguire o ricomincia.
   In alto, le icone **▶** e **■** avviano o fermano tutte le chat.
-- **Modifica…** (o doppio clic) cambia cartella e filtri; **Rimuovi** toglie la chat dall'elenco
-  (i file scaricati restano).
+- **Modifica…** (o doppio clic) cambia cartella, filtri e opzioni; **Rimuovi** toglie la chat dall'elenco
+  (i file scaricati restano). Se cambi i filtri l'app chiede se applicarli anche ai messaggi già arrivati
+  (rilegge la chat) o solo a quelli nuovi.
+- Ogni chat ha le stesse opzioni della scheda Download: **File già esistenti** (salta / rinomina / sovrascrivi)
+  e **Salta i doppioni**.
+- **Ricontrolla da capo…** (anche dal tasto destro sulla riga) rilegge una volta tutta la chat e poi torna
+  in ascolto. Con «Salta se già presente» scarica solo ciò che manca (file cancellati o spostati dalla cartella,
+  file che rientrano nei filtri ma non erano stati scaricati); con «Sovrascrivi» riscarica tutto.
+  Prima di partire chiede conferma e dice quale dei due casi si applica.
 - I download paralleli indicati in questa scheda valgono per tutte le chat seguite insieme.
 
-Se chiudi l'app, alla riapertura le chat avviate ripartono da sole e recuperano solo i messaggi arrivati
-nel frattempo. I file trovati in passato ma non ancora scaricati vengono rimessi in coda poco alla volta:
-per questo il totale dei file cresce, e lo stato lo indica («il totale cresce: altri N file in sospeso»).
-I file che erano già falliti si riprovano per ultimi.
+Se chiudi l'app, alla riapertura le chat avviate ripartono da sole e leggono solo i messaggi arrivati
+nel frattempo, senza rileggere tutta la chat: i file già scaricati non vengono toccati e quelli a metà
+ripartono dall'ultimo blocco salvato. I file trovati in passato ma non ancora scaricati vengono rimessi in coda
+poco alla volta: per questo il totale dei file cresce, e lo stato lo indica («il totale cresce: altri N file
+in sospeso»). I file che erano già falliti si riprovano per ultimi.
 
 Una chat seguita non si può scaricare contemporaneamente dalla scheda Download: prima va fermata.
 

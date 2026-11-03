@@ -157,6 +157,18 @@ class EngineTest(unittest.TestCase):
             self.assertEqual((s.completed, s.skipped), (0, 3), policy)
         self.assertEqual(sorted(p.name for p in self.dest.iterdir()), ["foto.png", "libro.pdf", "video.mp4"])
 
+    def test_rescan_from_start(self):
+        """«Ricontrolla da capo» di una chat seguita: rilettura completa (resume_from_last=False)."""
+        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, follow=False)
+        self.assertEqual(s.completed, 3)
+        (self.dest / "video.mp4").unlink()  # cancellato a mano dalla cartella
+        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False)
+        self.assertEqual((s.scanned, s.completed, s.skipped), (3, 1, 2))  # riscarica solo quello che manca
+        self.assertEqual((self.dest / "video.mp4").read_bytes(), self.msgs[2].document.data)
+        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, duplicate_policy="overwrite")
+        self.assertEqual(s.completed, 3)  # «Sovrascrivi»: riscarica tutto, senza creare copie
+        self.assertEqual(sorted(p.name for p in self.dest.iterdir()), ["foto.png", "libro.pdf", "video.mp4"])
+
     def test_only_selected_extension(self):
         msgs = self.msgs + [make_msg(4, "romanzo.EPUB", b"e" * 50), make_msg(5, "altro.epub", b"f" * 60)]
         s, _ = self.run_job(FakeClient(msgs), extensions={".epub"}, folder_by_source=False)

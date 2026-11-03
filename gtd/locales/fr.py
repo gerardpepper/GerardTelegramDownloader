@@ -343,4 +343,30 @@ STRINGS: dict[str, str] = {
         "Téléchargement {done} sur {total} fichiers ({percent}%) · le total augmente : encore {left} fichiers en attente à reprendre",
     "il totale cresce: altri {left} file in sospeso da riprendere":
         "le total augmente : encore {left} fichiers en attente à reprendre",
+
+    # ---- scheda «Segui»: ricontrolla da capo, opzioni dei file esistenti
+    "Applicare i nuovi filtri anche ai messaggi già arrivati in «{source}»?\nL'app rilegge la chat dall'inizio e scarica i file che ora corrispondono; quelli già scaricati vengono saltati.":
+        "Appliquer les nouveaux filtres aussi aux messages déjà arrivés dans «{source}» ?\nL'application relit la discussion depuis le début et télécharge les fichiers qui correspondent maintenant ; ceux déjà téléchargés sont ignorés.",
+    "Avvia":
+        "Lancer",
+    "Filtri cambiati":
+        "Filtres modifiés",
+    "Ricontrolla":
+        "Revérifier",
+    "Ricontrolla da capo":
+        "Revérifier depuis le début",
+    "Ricontrolla da capo…":
+        "Revérifier depuis le début…",
+    "Ricontrollo la chat da capo":
+        "Revérification de la discussion depuis le début",
+    "Rilegge tutta la chat dall'inizio e scarica i file che mancano\n(o tutti, se la chat è impostata per sovrascrivere i file già esistenti)":
+        "Relit toute la discussion depuis le début et télécharge les fichiers manquants\n(ou tous, si la discussion est réglée pour écraser les fichiers existants)",
+    "Rileggo tutta «{source}» dall'inizio e riscarico TUTTI i file che corrispondono ai filtri, sovrascrivendo quelli già presenti nella cartella.\nSu una chat grande può richiedere molto tempo.":
+        "Je relis tout «{source}» depuis le début et retélécharge TOUS les fichiers qui correspondent aux filtres, en écrasant ceux déjà présents dans le dossier.\nSur une grande discussion, cela peut prendre beaucoup de temps.",
+    "Rileggo tutta «{source}» dall'inizio e scarico solo i file che mancano: quelli cancellati o spostati dalla cartella e quelli che rientrano nei filtri ma non erano stati scaricati.\nI file già presenti vengono saltati. Su una chat grande la lettura richiede qualche minuto.":
+        "Je relis tout «{source}» depuis le début et télécharge seulement les fichiers manquants : ceux supprimés ou déplacés du dossier et ceux qui correspondent aux filtres mais n'avaient pas été téléchargés.\nLes fichiers déjà présents sont ignorés. Sur une grande discussion, la lecture prend quelques minutes.",
+    "Solo ai messaggi nuovi":
+        "Seulement aux nouveaux messages",
+    "Sì, ricontrolla la chat":
+        "Oui, revérifier la discussion",
 }

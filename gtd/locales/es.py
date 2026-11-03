@@ -343,4 +343,30 @@ STRINGS: dict[str, str] = {
         "Descargando {done} de {total} archivos ({percent}%) · el total crece: otros {left} archivos pendientes por reanudar",
     "il totale cresce: altri {left} file in sospeso da riprendere":
         "el total crece: otros {left} archivos pendientes por reanudar",
+
+    # ---- scheda «Segui»: ricontrolla da capo, opzioni dei file esistenti
+    "Applicare i nuovi filtri anche ai messaggi già arrivati in «{source}»?\nL'app rilegge la chat dall'inizio e scarica i file che ora corrispondono; quelli già scaricati vengono saltati.":
+        "¿Aplicar los nuevos filtros también a los mensajes ya llegados a «{source}»?\nLa app vuelve a leer el chat desde el principio y descarga los archivos que ahora coinciden; los ya descargados se omiten.",
+    "Avvia":
+        "Iniciar",
+    "Filtri cambiati":
+        "Filtros cambiados",
+    "Ricontrolla":
+        "Revisar",
+    "Ricontrolla da capo":
+        "Revisar desde el principio",
+    "Ricontrolla da capo…":
+        "Revisar desde el principio…",
+    "Ricontrollo la chat da capo":
+        "Reviso el chat desde el principio",
+    "Rilegge tutta la chat dall'inizio e scarica i file che mancano\n(o tutti, se la chat è impostata per sovrascrivere i file già esistenti)":
+        "Vuelve a leer todo el chat desde el principio y descarga los archivos que faltan\n(o todos, si el chat está configurado para sobrescribir los archivos existentes)",
+    "Rileggo tutta «{source}» dall'inizio e riscarico TUTTI i file che corrispondono ai filtri, sovrascrivendo quelli già presenti nella cartella.\nSu una chat grande può richiedere molto tempo.":
+        "Vuelvo a leer todo «{source}» desde el principio y descargo de nuevo TODOS los archivos que coinciden con los filtros, sobrescribiendo los que ya están en la carpeta.\nEn un chat grande puede tardar mucho.",
+    "Rileggo tutta «{source}» dall'inizio e scarico solo i file che mancano: quelli cancellati o spostati dalla cartella e quelli che rientrano nei filtri ma non erano stati scaricati.\nI file già presenti vengono saltati. Su una chat grande la lettura richiede qualche minuto.":
+        "Vuelvo a leer todo «{source}» desde el principio y descargo solo los archivos que faltan: los borrados o movidos de la carpeta y los que coinciden con los filtros pero no se habían descargado.\nLos archivos ya presentes se omiten. En un chat grande la lectura tarda unos minutos.",
+    "Solo ai messaggi nuovi":
+        "Solo a los mensajes nuevos",
+    "Sì, ricontrolla la chat":
+        "Sí, revisar el chat",
 }

@@ -49,11 +49,12 @@ def app_icon() -> QIcon:
     return icon
 
 
-def confirm(parent: QWidget, title: str, text: str, yes: str, checkbox: QCheckBox | None = None) -> bool:
+def confirm(parent: QWidget, title: str, text: str, yes: str, checkbox: QCheckBox | None = None,
+            no: str | None = None) -> bool:
     """Domanda con pulsanti nella lingua dell'app (Yes/No standard di Qt restano in inglese)."""
     box = QMessageBox(QMessageBox.Icon.Question, title, text, parent=parent)
     ok = box.addButton(yes, QMessageBox.ButtonRole.AcceptRole)
-    box.addButton(tr("Annulla"), QMessageBox.ButtonRole.RejectRole)
+    box.addButton(no or tr("Annulla"), QMessageBox.ButtonRole.RejectRole)
     box.setDefaultButton(ok)
     if checkbox is not None:
         box.setCheckBox(checkbox)

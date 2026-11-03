@@ -558,7 +558,8 @@ class DownloadPage(QWidget):
             presets=[n for n, cb in self.preset_checks.items() if cb.isChecked()],
             custom_extensions=self.custom_ext.text().strip(), name_filter=self.name_edit.text().strip(),
             name_in_caption=self.caption_chk.isChecked(), folder_by_source=self.by_source.isChecked(),
-            folder_by_type=self.by_type.isChecked(), folder_by_date=self.by_date.isChecked())
+            folder_by_type=self.by_type.isChecked(), folder_by_date=self.by_date.isChecked(),
+            duplicate_policy=self.dup_combo.currentData(), skip_duplicates=self.dedupe_chk.isChecked())
         self.win.follow_page.add_chat(chat)
 
     def _on_pause(self) -> None:

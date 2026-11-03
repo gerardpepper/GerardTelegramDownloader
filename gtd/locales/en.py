@@ -343,4 +343,30 @@ STRINGS: dict[str, str] = {
         "Downloading {done} of {total} files ({percent}%) · the total is growing: {left} more pending files to resume",
     "il totale cresce: altri {left} file in sospeso da riprendere":
         "the total is growing: {left} more pending files to resume",
+
+    # ---- scheda «Segui»: ricontrolla da capo, opzioni dei file esistenti
+    "Applicare i nuovi filtri anche ai messaggi già arrivati in «{source}»?\nL'app rilegge la chat dall'inizio e scarica i file che ora corrispondono; quelli già scaricati vengono saltati.":
+        "Apply the new filters to the messages already in «{source}» too?\nThe app reads the chat again from the start and downloads the files that now match; those already downloaded are skipped.",
+    "Avvia":
+        "Start",
+    "Filtri cambiati":
+        "Filters changed",
+    "Ricontrolla":
+        "Recheck",
+    "Ricontrolla da capo":
+        "Recheck from the start",
+    "Ricontrolla da capo…":
+        "Recheck from the start…",
+    "Ricontrollo la chat da capo":
+        "Rechecking the chat from the start",
+    "Rilegge tutta la chat dall'inizio e scarica i file che mancano\n(o tutti, se la chat è impostata per sovrascrivere i file già esistenti)":
+        "Reads the whole chat again from the start and downloads the missing files\n(or all of them, if the chat is set to overwrite existing files)",
+    "Rileggo tutta «{source}» dall'inizio e riscarico TUTTI i file che corrispondono ai filtri, sovrascrivendo quelli già presenti nella cartella.\nSu una chat grande può richiedere molto tempo.":
+        "I'll read all of «{source}» again from the start and download ALL files matching the filters again, overwriting those already in the folder.\nOn a large chat this can take a long time.",
+    "Rileggo tutta «{source}» dall'inizio e scarico solo i file che mancano: quelli cancellati o spostati dalla cartella e quelli che rientrano nei filtri ma non erano stati scaricati.\nI file già presenti vengono saltati. Su una chat grande la lettura richiede qualche minuto.":
+        "I'll read all of «{source}» again from the start and download only the missing files: those deleted or moved from the folder and those matching the filters that weren't downloaded.\nFiles already there are skipped. On a large chat reading takes a few minutes.",
+    "Solo ai messaggi nuovi":
+        "Only to new messages",
+    "Sì, ricontrolla la chat":
+        "Yes, recheck the chat",
 }

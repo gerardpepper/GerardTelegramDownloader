@@ -44,6 +44,8 @@ class FollowedChat:
     folder_by_source: bool = True
     folder_by_type: bool = False
     folder_by_date: bool = False
+    duplicate_policy: str = "skip"   # skip | rename | overwrite, come nella scheda Download
+    skip_duplicates: bool = True
     active: bool = True             # avviata (▶): la si segue, anche al prossimo avvio dell'app
 
     @classmethod
@@ -100,6 +102,7 @@ class Settings:
                 destination=settings.destination, presets=list(settings.presets),
                 custom_extensions=settings.custom_extensions, folder_by_source=settings.folder_by_source,
                 folder_by_type=settings.folder_by_type, folder_by_date=settings.folder_by_date,
+                duplicate_policy=settings.duplicate_policy, skip_duplicates=settings.skip_duplicates,
                 active=bool(raw.get("follow_resume"))))
         encrypted = raw.get("api_hash_enc", "")
         if encrypted:
