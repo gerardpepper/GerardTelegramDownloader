@@ -23,15 +23,29 @@ Dal secondo avvio in poi l'accesso è automatico.
 Chiavi e sessione sono salvate in `%APPDATA%\GerardTelegramDownloader`, cifrate con il tuo utente Windows (DPAPI):
 non funzionano se copiate su un altro PC o un altro utente. **Non condividere mai api_hash né la cartella dati.**
 
+La stessa guida è nell'app: nella pagina di accesso e, in ogni momento, nel menu **? → Guida**.
+
+### Uscire dall'account
+L'icona di uscita in alto a destra (accanto a «Connesso come…») scollega questo PC dal tuo account Telegram.
+Prima ferma i download e le chat seguite. Spuntando **Cancella anche le chiavi API** vengono tolti dal PC
+anche api_id e api_hash: al prossimo accesso andranno reinseriti.
+
 ## Uso
 
 1. Scegli la chat da **Chat recenti** oppure incolla un link `https://t.me/...` / `@username`
    (per i link d'invito privati devi essere già membro).
 2. Scegli la **cartella di destinazione** (anche di rete).
-3. Facoltativo: filtri per tipo (preset o estensioni personalizzate) e per dimensione.
+3. Facoltativo: filtri per tipo (preset o estensioni personalizzate), per nome e per dimensione.
 4. Opzioni: gestione dei file già esistenti, sottocartelle automatiche (sorgente / tipo / data),
-   download paralleli (1–4), notifiche, spegnimento a fine coda.
+   download paralleli (1–8), notifiche, spegnimento a fine coda.
 5. **Avvia download**. Puoi mettere in **Pausa** o **Annullare** in qualsiasi momento.
+
+### Filtro per nome
+In **Nome contiene** scrivi una o più parole separate da virgola (es. `fattura, preventivo`): vengono scaricati
+solo i file che ne contengono almeno una. Maiuscole e accenti non contano, e `_ - .` valgono come spazi
+(`Mario_Rossi.pdf` si trova cercando `mario rossi`). Con **cerca le parole anche nel testo del messaggio**
+conta anche la didascalia: utile per le foto, che non hanno un nome. Il filtro si combina con quello per tipo;
+se non scegli nessun tipo valgono tutte le estensioni.
 
 ### Ripresa dei download
 I file in corso vengono scritti come `nome.ext.part` e l'avanzamento è salvato in `state.db` (SQLite).
@@ -46,16 +60,34 @@ Con **Salta i doppioni** attivo, lo stesso file ripubblicato nel canale con un a
 (stesso SHA-256) e scartato. Ogni file saltato compare in giallo nel registro con il motivo;
 la casella **Mostra avvisi** nasconde o mostra le righe gialle.
 
-### Seguire una chat
-Con **Continua a seguire la chat**, finito il download l'app resta in ascolto: Telegram la avvisa dei nuovi
-messaggi e i file vengono scaricati subito (più un controllo di sicurezza ogni 10 minuti).
-Se chiudi l'app mentre segue una chat, alla riapertura riprende da sola e recupera solo i messaggi
-arrivati nel frattempo, senza rileggere tutta la chat. «Smetti di seguire» la ferma.
+### Seguire le chat (scheda «Segui»)
+Nella scheda **Segui** tieni d'occhio quante chat vuoi, ognuna con la sua cartella e i suoi filtri:
+l'app resta in ascolto, Telegram la avvisa dei nuovi messaggi e i file vengono scaricati subito
+(più un controllo di sicurezza ogni 10 minuti).
+
+- **Aggiungi chat…**, oppure **Segui questa chat…** nella scheda Download (usa la chat, la cartella e i filtri
+  già impostati lì). Puoi scegliere se scaricare anche i file già presenti o solo quelli in arrivo da adesso.
+- Su ogni riga: **⏸** mette in pausa per un momento, **■ / ▶** smette di seguire o ricomincia.
+  In alto, le icone **▶** e **■** avviano o fermano tutte le chat.
+- **Modifica…** (o doppio clic) cambia cartella e filtri; **Rimuovi** toglie la chat dall'elenco
+  (i file scaricati restano).
+- I download paralleli indicati in questa scheda valgono per tutte le chat seguite insieme.
+
+Se chiudi l'app, alla riapertura le chat avviate ripartono da sole e recuperano solo i messaggi arrivati
+nel frattempo. I file trovati in passato ma non ancora scaricati vengono rimessi in coda poco alla volta:
+per questo il totale dei file cresce, e lo stato lo indica («il totale cresce: altri N file in sospeso»).
+I file che erano già falliti si riprovano per ultimi.
+
+Una chat seguita non si può scaricare contemporaneamente dalla scheda Download: prima va fermata.
 
 Mentre scarica o segue una chat, l'app impedisce a Windows di andare in sospensione (lo schermo può spegnersi).
+Alla chiusura, se ci sono download in corso, l'app chiede conferma; con **Non chiedere più** la domanda sparisce
+(si riattiva da *Visualizza → Chiedi conferma alla chiusura…*).
 
 ### Limiti di Telegram (FloodWait)
-Se Telegram chiede di rallentare, l'app si ferma da sola e mostra il conto alla rovescia, poi riprende.
+Se Telegram chiede di rallentare i download, l'app si ferma da sola e mostra il conto alla rovescia, poi riprende;
+la pausa vale per tutte le schede, perché il limite è dell'account. Se lo chiede durante la lettura dei messaggi
+si ferma solo la lettura: i download continuano.
 Con molti download paralleli i limiti scattano più spesso: in caso di problemi usa 1–2 download alla volta.
 
 ### Lingua
@@ -67,10 +99,15 @@ non tradotte e `python tests\test_i18n.py` le elenca tutte.
 ## Sviluppo
 
 ```powershell
-.\avvia.ps1          # crea .venv (al primo avvio) e lancia l'app dai sorgenti
+.\avvia.ps1          # lancia l'app dai sorgenti (al primo avvio crea l'ambiente Python)
 .\build.ps1          # esegue i test e crea dist\GerardTelegramDownloader.exe
 .venv\Scripts\python -m unittest discover -s tests -v
 ```
+
+Gli script usano il primo ambiente Python del progetto che funziona per l'utente Windows corrente
+(`.venv`, poi `.venv-*`). Un ambiente creato da un altro utente punta al suo Python e non si può usare:
+in quel caso ne creano uno nuovo, `.venv-<utente>`. Le funzioni sono in `tools\python.ps1`.
+Per i test usa l'ambiente che funziona per te (es. `.venv-<utente>\Scripts\python`).
 
 Struttura:
 
@@ -82,7 +119,8 @@ Struttura:
 | `gtd/telegram.py` | client Telethon e sessione cifrata |
 | `gtd/dpapi.py` | cifratura Windows DPAPI |
 | `gtd/config.py` | impostazioni e log (`%APPDATA%\GerardTelegramDownloader`) |
-| `gtd/ui/` | finestra principale, pagina di login, pagina di download |
+| `gtd/ui/` | finestra principale, accesso, schede Download e Segui, registro |
+| `tools/python.ps1` | scelta o creazione dell'ambiente Python, usata da `avvia.ps1` e `build.ps1` |
 | `tests/` | test del motore con un client Telegram simulato |
 
 Stack: Python 3.14, Telethon, PyQt6, qasync, PyInstaller.
