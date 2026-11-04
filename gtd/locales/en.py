@@ -369,4 +369,22 @@ STRINGS: dict[str, str] = {
         "Only to new messages",
     "Sì, ricontrolla la chat":
         "Yes, recheck the chat",
+    "Riprova ora: salta l'attesa prima del prossimo tentativo, o ricomincia il download se è fermo (riparte da dove era arrivato)":
+        'Retry now: skips the wait before the next attempt, or restarts the download if it is stuck (it resumes where it left off)',
+    'Togli dalla coda: il file non viene scaricato, nemmeno al prossimo avvio (torna solo rianalizzando tutta la chat)':
+        'Remove from queue: the file is not downloaded, not even at the next start (it comes back only by rescanning the whole chat)',
+    'Tolto dalla coda: {name}':
+        'Removed from queue: {name}',
+    'in attesa di un posto libero':
+        'waiting for a free slot',
+    'in pausa':
+        'paused',
+    'la rete blocca il server di Telegram che contiene il file (DC {dc}): al posto dei dati arriva una pagina web, di solito da un firewall o da un proxy':
+        'the network blocks the Telegram server that holds the file (DC {dc}): a web page arrives instead of the data, usually from a firewall or a proxy',
+    'nuovo tentativo alle {time}':
+        'next attempt at {time}',
+    'tolto dalla coda':
+        'removed from queue',
+    '{name}: nuovo tentativo richiesto':
+        '{name}: new attempt requested',
 }

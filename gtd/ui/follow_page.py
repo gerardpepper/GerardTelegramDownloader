@@ -23,7 +23,7 @@ from ..engine import (MAX_PARALLEL, DownloadEngine, FloodGate, JobOptions, Slots
                       parse_name_filter)
 from ..i18n import N_, tr
 from ..power import keep_awake
-from .common import confirm, pause_icon, play_icon, spawn, stop_icon
+from .common import confirm, file_actions, icon_button, pause_icon, play_icon, spawn, stop_icon
 from .download_page import DUPLICATE_POLICIES, MB, PRESETS, extensions_from, filter_text
 from .logpanel import LogPanel
 
@@ -33,15 +33,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 RETRY_SECONDS = 60  # se una chat seguita si ferma da sola (rete assente a lungo, chat non trovata) si riprova
-
-
-def _icon_button(icon, size: int) -> QToolButton:
-    """Pulsante solo icona: cosa fa lo dice il suggerimento al passaggio del mouse."""
-    button = QToolButton()
-    button.setIcon(icon)
-    button.setIconSize(QSize(size, size))
-    button.setAutoRaise(True)
-    return button
 
 
 def _filters(chat: FollowedChat) -> tuple:
@@ -259,7 +250,10 @@ class _FollowRun:
         self.page.update_overall()
 
     def file_started(self, item) -> None:
-        self.page.file_started(self.chat.name, item)
+        self.page.file_started(self.chat.name, item, self.engine)
+
+    def file_waiting(self, item, text: str) -> None:
+        self.page.file_waiting(item, text)
 
     def file_progress(self, item, speed: float, eta: float | None) -> None:
         self.page.file_progress(item, speed, eta)
@@ -285,7 +279,7 @@ class _FollowRun:
 
 class FollowPage(QWidget):
     COLUMNS = [N_("Chat"), N_("Destinazione"), N_("Filtri"), N_("Stato"), N_("Ultimo controllo"), N_("Nuovi file")]
-    FILE_COLUMNS = [N_("Chat"), N_("File in corso"), N_("Avanzamento"), N_("Velocità"), N_("Tempo rimanente")]
+    FILE_COLUMNS = [N_("Chat"), N_("File in corso"), N_("Avanzamento"), N_("Velocità"), N_("Tempo rimanente"), ""]
 
     def __init__(self, window: "MainWindow"):
         super().__init__()
@@ -302,8 +296,8 @@ class FollowPage(QWidget):
         self.edit_btn = QPushButton()
         self.remove_btn = QPushButton()
         self.rescan_btn = QPushButton()
-        self.start_all_btn = _icon_button(play_icon(), 22)
-        self.stop_all_btn = _icon_button(stop_icon(), 22)
+        self.start_all_btn = icon_button(play_icon(), 22)
+        self.stop_all_btn = icon_button(stop_icon(), 22)
         for b in (self.add_btn, self.edit_btn, self.remove_btn, self.rescan_btn):
             bar.addWidget(b)
         bar.addSpacing(16)
@@ -351,7 +345,7 @@ class FollowPage(QWidget):
         fheader = self.files.horizontalHeader()
         fheader.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         fheader.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        for col in (2, 3, 4):
+        for col in (2, 3, 4, 5):
             fheader.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         self._row_height = self.files.fontMetrics().height() + 8
         self.files.verticalHeader().setDefaultSectionSize(self._row_height)
@@ -391,7 +385,7 @@ class FollowPage(QWidget):
                                       "(o tutti, se la chat è impostata per sovrascrivere i file già esistenti)"))
         self.start_all_btn.setToolTip(tr("Avvia tutte"))
         self.stop_all_btn.setToolTip(tr("Ferma tutte"))
-        self.files.setHorizontalHeaderLabels([tr(c) for c in self.FILE_COLUMNS])
+        self.files.setHorizontalHeaderLabels([tr(c) if c else "" for c in self.FILE_COLUMNS])
         self.parallel_label.setText(tr("Download paralleli:"))
         self.parallel_spin.setToolTip(tr("Per tutte le chat seguite insieme"))
         self.log_panel.retranslate()
@@ -435,8 +429,8 @@ class FollowPage(QWidget):
         h = QHBoxLayout(box)
         h.setContentsMargins(4, 0, 4, 0)
         h.setSpacing(2)
-        pause = _icon_button(pause_icon(), 16)
-        play_stop = _icon_button(play_icon(), 16)
+        pause = icon_button(pause_icon(), 16)
+        play_stop = icon_button(play_icon(), 16)
         pause.clicked.connect(lambda: self._toggle_pause(chat))
         play_stop.clicked.connect(lambda: self._set_active(chat, not chat.active))
         h.addWidget(pause)
@@ -855,7 +849,7 @@ class FollowPage(QWidget):
         header = self.files.horizontalHeader().sizeHint().height()
         self.files.setFixedHeight(header + rows * self._row_height + 2 * self.files.frameWidth())
 
-    def file_started(self, chat_name: str, item) -> None:
+    def file_started(self, chat_name: str, item, engine: DownloadEngine) -> None:
         row = self.files.rowCount()
         self.files.insertRow(row)
         name_item = QTableWidgetItem(item.name)
@@ -868,8 +862,17 @@ class FollowPage(QWidget):
         self.files.setCellWidget(row, 2, bar)
         self.files.setItem(row, 3, QTableWidgetItem("—"))
         self.files.setItem(row, 4, QTableWidgetItem("—"))
+        self.files.setCellWidget(row, 5, file_actions(lambda: engine.retry_now(item), lambda: engine.drop(item)))
         self._file_rows[item.key] = (name_item, bar)
         self._fit_files_height()
+
+    def file_waiting(self, item, text: str) -> None:
+        """File iniziato ma fermo (in attesa di riprovare, di un posto libero, in pausa): si dice perché."""
+        entry = self._file_rows.get(item.key)
+        if entry:
+            row = self.files.row(entry[0])
+            self.files.item(row, 3).setText(text)
+            self.files.item(row, 4).setText("—")
 
     def file_progress(self, item, speed: float, eta: float | None) -> None:
         entry = self._file_rows.get(item.key)

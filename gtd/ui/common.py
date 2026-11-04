@@ -4,9 +4,9 @@ import asyncio
 import logging
 from typing import Callable
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QGuiApplication, QIcon, QPainter, QPalette, QPen, QPixmap
-from PyQt6.QtWidgets import QApplication, QCheckBox, QMessageBox, QWidget
+from PyQt6.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QMessageBox, QToolButton, QWidget
 
 from ..i18n import tr
 
@@ -106,6 +106,54 @@ def pause_icon() -> QIcon:
 
 def stop_icon() -> QIcon:
     return _drawn_icon(STOP_COLOR, lambda p: p.drawRoundedRect(QRectF(5, 5, 14, 14), 2, 2))
+
+
+RETRY_COLOR = QColor("#229ED9")
+
+
+def retry_icon() -> QIcon:
+    """Freccia circolare."""
+    def draw(p: QPainter) -> None:
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawArc(QRectF(5, 5, 14, 14), 60 * 16, 290 * 16)
+        p.setBrush(RETRY_COLOR)
+        p.drawPolygon([QPointF(12.5, 1.5), QPointF(17.5, 5.5), QPointF(12, 8.5)])
+    return _drawn_icon(RETRY_COLOR, draw)
+
+
+def remove_icon() -> QIcon:
+    """Croce."""
+    def draw(p: QPainter) -> None:
+        p.drawLine(QPointF(7, 7), QPointF(17, 17))
+        p.drawLine(QPointF(17, 7), QPointF(7, 17))
+    return _drawn_icon(STOP_COLOR, draw)
+
+
+def icon_button(icon: QIcon, size: int, tooltip: str = "") -> QToolButton:
+    """Pulsante solo icona: cosa fa lo dice il suggerimento al passaggio del mouse."""
+    button = QToolButton()
+    button.setIcon(icon)
+    button.setIconSize(QSize(size, size))
+    button.setAutoRaise(True)
+    button.setToolTip(tooltip)
+    return button
+
+
+def file_actions(on_retry: Callable[[], None], on_drop: Callable[[], None]) -> QWidget:
+    """«Riprova ora» e «Togli dalla coda» per una riga dei file in corso."""
+    box = QWidget()
+    h = QHBoxLayout(box)
+    h.setContentsMargins(2, 0, 2, 0)
+    h.setSpacing(0)
+    retry = icon_button(retry_icon(), 14, tr("Riprova ora: salta l'attesa prima del prossimo tentativo, "
+                                             "o ricomincia il download se è fermo (riparte da dove era arrivato)"))
+    drop = icon_button(remove_icon(), 14, tr("Togli dalla coda: il file non viene scaricato, nemmeno al prossimo "
+                                             "avvio (torna solo rianalizzando tutta la chat)"))
+    retry.clicked.connect(on_retry)
+    drop.clicked.connect(lambda: (drop.setEnabled(False), retry.setEnabled(False), on_drop()))
+    h.addWidget(retry)
+    h.addWidget(drop)
+    return box
 
 
 def _dark_palette() -> QPalette:

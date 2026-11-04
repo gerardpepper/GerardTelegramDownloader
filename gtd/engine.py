@@ -37,6 +37,16 @@ REQUEUE_LOW_WATER = 50           # se ne chiedono altri solo quando in coda ne r
 # errori di rete/Telegram da cui si riparte: IncompleteReadError (EOFError) è quello che bloccava i download
 _TRANSIENT = (errors.RPCError, OSError, ConnectionError, EOFError, asyncio.TimeoutError)
 
+# Telethon legge i primi 4 byte di ogni risposta come lunghezza del pacchetto (e poi ne attende lunghezza - 8):
+# se valgono «HTTP» al posto di Telegram ha risposto un server web, di solito un firewall o un proxy della rete.
+# Nei registri: «758 bytes read on a total of 1347703872 expected bytes», mai risolto riprovando.
+_HTTP_AS_LENGTH = int.from_bytes(b"HTTP", "little") - 8
+
+
+def _blocked_by_network(e: BaseException) -> bool:
+    return (isinstance(e, asyncio.IncompleteReadError) and e.expected == _HTTP_AS_LENGTH) \
+        or f"{_HTTP_AS_LENGTH} expected bytes" in str(e)
+
 _INVALID_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL",
                    *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}
@@ -81,6 +91,10 @@ class Cancelled(Exception):
 
 class IntegrityError(Exception):
     pass
+
+
+class Dropped(Exception):
+    """Il file è stato tolto dalla coda dall'utente."""
 
 
 class Slots:
@@ -148,6 +162,7 @@ class Listener(Protocol):
     def file_started(self, item: "DownloadItem") -> None: ...
     def file_progress(self, item: "DownloadItem", speed: float, eta: float | None) -> None: ...
     def file_finished(self, item: "DownloadItem", ok: bool, error: str) -> None: ...
+    def file_waiting(self, item: "DownloadItem", text: str) -> None: ...  # file iniziato ma fermo: perché
     def flood_wait(self, seconds_left: int) -> None: ...
     def following(self, last_check: datetime) -> None: ...
     def new_files(self, count: int) -> None: ...
@@ -185,6 +200,11 @@ class DownloadItem:
     _samples: deque = field(default_factory=lambda: deque(maxlen=40), repr=False)
     _last_emit: float = 0.0
     _last_persist: int = 0
+    dropped: bool = False           # tolto dalla coda dall'utente
+    _has_slot: bool = False
+    _restart: bool = False          # «Riprova ora»: il tentativo in corso si interrompe e si riparte subito
+    _wake: asyncio.Event = field(default_factory=asyncio.Event, repr=False)  # interrompe le attese
+    _task: asyncio.Task | None = field(default=None, repr=False)            # trasferimento in corso
 
     @property
     def msg_id(self) -> int:
@@ -268,6 +288,24 @@ class DownloadEngine:
         self._running.set()
         self._wake.set()
 
+    def retry_now(self, item: DownloadItem) -> None:
+        """Salta l'attesa prima del prossimo tentativo, o interrompe il trasferimento e lo ricomincia
+        (riparte dal punto già scaricato). Se il file aspetta un posto libero, resta in fila."""
+        if item.dropped:
+            return
+        item._restart = True
+        item._wake.set()
+        if item._task and not item._task.done():
+            item._task.cancel()
+
+    def drop(self, item: DownloadItem) -> None:
+        """Toglie il file dalla coda: non viene più scaricato e non viene ripreso al prossimo avvio
+        (torna solo se si rianalizza tutta la chat)."""
+        item.dropped = True
+        item._wake.set()
+        if item._task and not item._task.done():
+            item._task.cancel()
+
     @property
     def parallel(self) -> int:
         return self._slots.limit
@@ -280,60 +318,94 @@ class DownloadEngine:
         self._slots.set_limit(n)
         self.l.log("info", tr("Download paralleli: {n}", n=n))
 
-    async def _wait(self, target: asyncio.Event | asyncio.Future) -> None:
+    async def _wait(self, target: asyncio.Event | asyncio.Future, also: asyncio.Event | None = None) -> None:
         """Attende l'evento (o il biglietto di uno slot), ma esce subito (Cancelled) se questo motore
-        viene annullato. Il biglietto non viene annullato qui: ci pensa chi l'ha chiesto."""
+        viene annullato, e appena è impostato also (se c'è). Il biglietto non viene annullato qui."""
         is_event = isinstance(target, asyncio.Event)
         if not (target.is_set() if is_event else target.done()):
             first = asyncio.ensure_future(target.wait()) if is_event else target
-            cancel = asyncio.ensure_future(self._cancel_event.wait())
+            others = [asyncio.ensure_future(self._cancel_event.wait())]
+            if also is not None:
+                others.append(asyncio.ensure_future(also.wait()))
             try:
-                await asyncio.wait([first, cancel], return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.wait([first, *others], return_when=asyncio.FIRST_COMPLETED)
             finally:
-                cancel.cancel()
+                for other in others:
+                    other.cancel()
                 if is_event:
                     first.cancel()
         if self._cancelled:
             raise Cancelled
 
-    async def _take_slot(self) -> None:
+    async def _take_slot(self, item: DownloadItem | None = None) -> None:
+        """Si mette in fila per un posto. Con item, la fila si abbandona (Dropped) se il file viene tolto."""
         slots = self._slots
+        wake = item._wake if item else None
         while True:
             if self._shared_slots and not self._running.is_set():
-                await self._wait(self._running)  # in pausa non ci si mette in fila per gli slot condivisi
+                await self._wait_paused(item)  # in pausa non ci si mette in fila per gli slot condivisi
             ticket = slots.request()
             try:
-                await self._wait(ticket)
-            except Cancelled:
+                while not ticket.done():
+                    await self._wait(ticket, wake)
+                    if item and item.dropped:
+                        raise Dropped
+                    if wake:
+                        wake.clear()  # «Riprova ora» mentre aspetta il posto: resta in fila
+            except BaseException:
                 slots.withdraw(ticket)
                 raise
             if self._shared_slots and not self._running.is_set():
                 slots.release()  # messa in pausa mentre era in fila: il posto va al prossimo
                 continue
+            if item:
+                item._has_slot = True
             return
 
-    async def _sleep_without_slot(self, seconds: float) -> None:
-        """Attesa prima di un nuovo tentativo: intanto lo slot va a un altro file
-        (un file che non scende non deve bloccare gli altri download)."""
-        await self._wait_without_slot(self._sleep(seconds))
+    def _release(self, item: DownloadItem) -> None:
+        if item._has_slot:
+            item._has_slot = False
+            self._slots.release()
 
-    async def _download_checkpoint(self) -> None:
-        """Come _checkpoint, ma dentro un download (slot occupato): in pausa lo slot passa
-        alle altre chat seguite, che condividono gli stessi slot."""
-        if self._shared_slots and not self._running.is_set() and not self._cancelled:
-            await self._wait_without_slot(self._wait(self._running))
-        await self._checkpoint()
+    async def _wait_paused(self, item: DownloadItem | None) -> None:
+        """Attende la ripresa; con item esce (Dropped) se il file viene tolto dalla coda."""
+        while not self._running.is_set():
+            await self._wait(self._running, item._wake if item else None)
+            if item:
+                if item.dropped:
+                    raise Dropped
+                item._wake.clear()
 
-    async def _wait_without_slot(self, waiting) -> None:
-        self._slots.release()
-        try:
-            await waiting
-        finally:
+    async def _retry_pause(self, item: DownloadItem, seconds: float) -> None:
+        """Attesa prima di un nuovo tentativo, senza slot: intanto il posto va a un altro file
+        (un file che non scende non deve bloccare gli altri download). «Riprova ora» la accorcia."""
+        self._release(item)
+        if not item._restart:
+            item._wake.clear()
+            sleep = asyncio.ensure_future(asyncio.sleep(seconds))
             try:
-                await self._take_slot()
-            except Cancelled:
-                self._slots.busy += 1  # il worker lo rilascia uscendo: i conti tornano
-                raise
+                await self._wait(sleep, item._wake)
+            finally:
+                sleep.cancel()
+        if item.dropped:
+            raise Dropped
+        item._restart = False
+        item._wake.clear()
+
+    async def _download_checkpoint(self, item: DownloadItem) -> None:
+        """Come _checkpoint, ma dentro un download: in pausa lo slot passa alle altre chat seguite,
+        che condividono gli stessi slot; se il file non ha uno slot (dopo un errore) si rimette in fila."""
+        if self._shared_slots and not self._running.is_set() and not self._cancelled:
+            self._release(item)
+            self.l.file_waiting(item, tr("in pausa"))
+            await self._wait_paused(item)
+        if item.dropped:
+            raise Dropped
+        if not item._has_slot:
+            if self._slots.busy >= self._slots.limit:
+                self.l.file_waiting(item, tr("in attesa di un posto libero"))
+            await self._take_slot(item)
+        await self._checkpoint()
 
     async def _checkpoint(self) -> None:
         if self._cancelled:
@@ -437,7 +509,7 @@ class DownloadEngine:
             if item is None or self._cancelled:
                 return
             try:
-                await self._take_slot()
+                await self._take_slot(item)
             except Cancelled:
                 return
             try:
@@ -446,7 +518,7 @@ class DownloadEngine:
                 log.exception("Errore imprevisto su %s", item.name)
                 self.l.log("error", tr("{name}: errore imprevisto, file saltato", name=item.name))
             finally:
-                self._slots.release()
+                self._release(item)
 
     def _enqueue(self, item: DownloadItem, summary: Summary, queue: asyncio.Queue) -> None:
         self._queued.add(item.key)
@@ -685,13 +757,27 @@ class DownloadEngine:
         ok, duplicate, error, attempt = False, False, "", 0
         while attempt < MAX_ATTEMPTS:
             try:
-                await self._download_checkpoint()
-                duplicate = await self._transfer(item)
+                await self._download_checkpoint(item)
+                item._restart = False
+                item._task = asyncio.ensure_future(self._transfer(item))
+                try:
+                    duplicate = await item._task
+                finally:
+                    item._task = None
                 ok = True
                 break
-            except Cancelled:
+            except (Cancelled, Dropped):
                 error = tr("annullato")
                 break
+            except asyncio.CancelledError:
+                if item.dropped:
+                    error = tr("annullato")
+                    break
+                if not item._restart:
+                    raise  # annullato da fuori: non è un «Riprova ora»
+                item._restart = False
+                self.l.log("info", tr("{name}: nuovo tentativo richiesto", name=item.name))
+                continue  # «Riprova ora» non consuma tentativi
             except errors.FloodWaitError as e:
                 try:
                     await self._handle_flood(e.seconds)
@@ -711,6 +797,13 @@ class DownloadEngine:
                     break
                 item.message = fresh
             except Exception as e:  # rete, Telegram, disco: si riprova con attesa crescente
+                if _blocked_by_network(e):
+                    # capita sempre allo stesso modo: riprovare subito è inutile (si riprova al prossimo avvio)
+                    dc = getattr(getattr(item.message, "document", None), "dc_id", None) or "?"
+                    error = tr("la rete blocca il server di Telegram che contiene il file (DC {dc}): "
+                               "al posto dei dati arriva una pagina web, di solito da un firewall o da un proxy",
+                               dc=dc)
+                    break
                 attempt += 1
                 error = str(e) or type(e).__name__
                 if not isinstance(e, (*_TRANSIENT, IntegrityError)):
@@ -721,9 +814,11 @@ class DownloadEngine:
                 self.l.log("warning", tr("{name}: errore ({error}), nuovo tentativo {attempt}/{max} tra {seconds}s",
                                          name=item.name, error=error, attempt=attempt + 1,
                                          max=MAX_ATTEMPTS, seconds=delay))
+                at = datetime.fromtimestamp(time.time() + delay).strftime("%H:%M:%S")
+                self.l.file_waiting(item, tr("nuovo tentativo alle {time}", time=at))
                 try:
-                    await self._sleep_without_slot(delay)
-                except Cancelled:
+                    await self._retry_pause(item, delay)
+                except (Cancelled, Dropped):
                     error = tr("annullato")
                     break
 
@@ -736,6 +831,16 @@ class DownloadEngine:
             else:
                 summary.completed += 1
                 summary.downloaded_bytes += item.size
+        elif item.dropped and not self._cancelled:
+            error = tr("tolto dalla coda")
+            # come se non fosse mai stato in coda: i totali tornano
+            self._total_files -= 1
+            self._total_bytes -= item.size
+            self._done_bytes -= item.done
+            summary.queued -= 1
+            item.part.unlink(missing_ok=True)
+            self.db.set_status(*item.key, "dropped")
+            self.l.log("skip", tr("Tolto dalla coda: {name}", name=item.name))
         elif self._cancelled:
             self.db.set_progress(*item.key, item.done)
         else:
@@ -808,7 +913,7 @@ class DownloadEngine:
                         break
                     except asyncio.TimeoutError:
                         raise asyncio.TimeoutError(tr("nessun dato da {seconds} secondi", seconds=CHUNK_TIMEOUT)) from None
-                    await self._download_checkpoint()
+                    await self._download_checkpoint(item)
                     chunk = chunk[:item.size - item.done]
                     f.write(chunk)
                     self._set_done(item, item.done + len(chunk))

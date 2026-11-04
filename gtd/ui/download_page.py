@@ -28,7 +28,7 @@ from ..engine import (MAX_PARALLEL, DownloadEngine, DownloadItem, JobOptions, Su
 from ..i18n import N_, tr
 from ..power import keep_awake
 from .avatars import AvatarCache, initials_icon
-from .common import confirm, spawn
+from .common import confirm, file_actions, spawn
 from .logpanel import LogPanel
 
 if TYPE_CHECKING:
@@ -262,15 +262,15 @@ class DownloadPage(QWidget):
         self.overall_label = QLabel()
         rv.addWidget(self.overall_label)
 
-        self.table = QTableWidget(0, 4)
+        self.table = QTableWidget(0, 5)
         self._texts.append(lambda: self.table.setHorizontalHeaderLabels(
-            [tr("File in corso"), tr("Avanzamento"), tr("Velocità"), tr("Tempo rimanente")]))
+            [tr("File in corso"), tr("Avanzamento"), tr("Velocità"), tr("Tempo rimanente"), ""]))
         self.table.verticalHeader().hide()
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for col in (1, 2, 3):
+        for col in (1, 2, 3, 4):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
         # righe compatte: la tabella è alta esattamente quanto i download in parallelo, il resto va al registro
         self._row_height = self.table.fontMetrics().height() + 8
@@ -772,8 +772,18 @@ class DownloadPage(QWidget):
         self.table.setCellWidget(row, 1, bar)
         self.table.setItem(row, 2, QTableWidgetItem("—"))
         self.table.setItem(row, 3, QTableWidgetItem("—"))
+        engine = self.engine
+        self.table.setCellWidget(row, 4, file_actions(lambda: engine.retry_now(item), lambda: engine.drop(item)))
         self._rows[item.key] = (name_item, bar)
         self._fit_table_height()
+
+    def file_waiting(self, item: DownloadItem, text: str) -> None:
+        """File iniziato ma fermo (in attesa di riprovare, in pausa): si dice perché."""
+        entry = self._rows.get(item.key)
+        if entry:
+            row = self.table.row(entry[0])
+            self.table.item(row, 2).setText(text)
+            self.table.item(row, 3).setText("—")
 
     def file_progress(self, item: DownloadItem, speed: float, eta: float | None) -> None:
         entry = self._rows.get(item.key)

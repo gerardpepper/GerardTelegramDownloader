@@ -50,6 +50,18 @@ se non scegli nessun tipo valgono tutte le estensioni.
 ### Ripresa dei download
 I file in corso vengono scritti come `nome.ext.part` e l'avanzamento è salvato in `state.db` (SQLite).
 Se la connessione cade il download riprova da solo (fino a 6 tentativi, con attesa crescente).
+Nell'attesa il file lascia il posto agli altri download, quindi nella tabella dei file in corso possono
+comparire più righe dei download paralleli: quelle ferme dicono perché nella colonna *Velocità*
+(«nuovo tentativo alle …», «in attesa di un posto libero», «in pausa»).
+Su ogni riga:
+- **↻ Riprova ora** salta l'attesa, oppure ricomincia un download che sembra fermo (riparte dal punto già scaricato);
+- **✕ Togli dalla coda** rinuncia al file: il pezzo scaricato viene cancellato e il file non viene ripreso
+  ai prossimi avvii. Torna solo se rianalizzi tutta la chat (scheda Download o *Ricontrolla da capo…*).
+
+Se l'errore è «758 bytes read on a total of 1347703872 expected bytes», al posto di Telegram ha risposto
+una pagina web: di solito un firewall o un proxy della rete blocca il server di Telegram che contiene quel file.
+Riprovare non serve, quindi il file viene segnato subito come non riuscito (con il numero del server, «DC»)
+e si ritenta al prossimo avvio: da un'altra rete, o dopo aver sbloccato quel server, scende normalmente.
 Se chiudi l'app o il PC si spegne, basta rilanciare lo stesso batch: i file completati vengono saltati
 e quelli parziali ripartono dall'ultimo blocco salvato.
 A fine download ogni file viene verificato (dimensione) e ne viene calcolato lo SHA-256, registrato nel database.

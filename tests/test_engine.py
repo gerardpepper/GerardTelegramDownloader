@@ -66,7 +66,7 @@ class FakeClient:
             raise errors.FloodWaitError(request=None, capture=1)
         if self.broken_once:
             self.broken_once = False
-            raise asyncio.IncompleteReadError(b"x" * 758, 1347703872)
+            raise asyncio.IncompleteReadError(b"x" * 758, 1048576)
         if self.stall_once:
             self.stall_once = False
             await asyncio.sleep(3600)
@@ -89,6 +89,7 @@ class Recorder:
     def file_started(self, item): pass
     def file_progress(self, item, speed, eta): pass
     def file_finished(self, item, ok, error): pass
+    def file_waiting(self, item, text): pass
     def flood_wait(self, seconds): self.floods.append(seconds)
     def following(self, last_check): self.follow_checks = getattr(self, "follow_checks", 0) + 1
     def new_files(self, count): pass
@@ -335,7 +336,7 @@ class EngineTest(unittest.TestCase):
         async def flaky(document, **kwargs):
             if document is bad.document:
                 finished_while_bad_waits.append(len(list(self.dest.rglob("doc*.epub"))))
-                raise asyncio.IncompleteReadError(b"x" * 758, 1347703872)  # la risposta «HTTP» di Telegram
+                raise asyncio.IncompleteReadError(b"x" * 100, 524288)  # connessione chiusa a metà
             async for chunk in original(document, **kwargs):
                 yield chunk
 
@@ -447,6 +448,123 @@ class EngineTest(unittest.TestCase):
         msgs = [make_msg(i, f"doc{i}.epub", os.urandom(2000)) for i in range(1, 21)]
         s, _ = self.run_job(FakeClient(msgs, broken_once=True), parallel=3)
         self.assertEqual((s.completed, s.failed), (20, 0))
+
+    def run_with(self, client, listener, act, **kw):
+        """Come run_job, ma act(engine) gira insieme al motore (per premere i pulsanti mentre scarica)."""
+        opts = JobOptions(entity=ENTITY, source_name="Canale: Prova", destination=self.dest,
+                          extensions=set(), **kw)
+
+        async def scenario():
+            engine = DownloadEngine(client, self.db, listener)
+            helper = asyncio.create_task(act(engine))
+            summary = await asyncio.wait_for(engine.run(opts), 20)
+            helper.cancel()
+            return summary
+
+        return asyncio.run(scenario())
+
+    def test_network_answering_http_fails_at_once(self):
+        """«758 bytes read on a total of 1347703872 expected bytes»: risponde un firewall, non Telegram.
+        Riprovare non serve (mai riuscito nei registri): il file fallisce subito, con una spiegazione."""
+        bad = make_msg(1, "bloccato.epub", b"x" * 100)
+        bad.document.dc_id = 4
+        client = FakeClient([bad, make_msg(2, "buono.epub", os.urandom(100))])
+        original, calls = client.iter_download, []
+
+        async def http(document, **kwargs):
+            if document is bad.document:
+                calls.append(1)
+                raise asyncio.IncompleteReadError(b"x" * 758, 1347703872)
+            async for chunk in original(document, **kwargs):
+                yield chunk
+
+        client.iter_download = http
+        s, rec = self.run_job(client)
+        self.assertEqual((s.completed, s.failed, len(calls)), (1, 1, 1))
+        self.assertTrue(any(lvl == "error" and "DC 4" in t and "firewall" in t for lvl, t in rec.logs))
+
+    def test_retry_now_skips_the_wait(self):
+        client = FakeClient([self.msgs[2]], fail_after=0)
+        waiting = []
+
+        class Listener(Recorder):
+            def file_waiting(self, item, text):
+                waiting.append((item, text))
+
+        async def act(engine):
+            while not waiting:
+                await asyncio.sleep(0.01)
+            engine.retry_now(waiting[0][0])
+
+        import time
+        start = time.monotonic()
+        s = self.run_with(client, Listener(), act)
+        self.assertEqual(s.completed, 1)
+        self.assertIn("nuovo tentativo alle", waiting[0][1])
+        self.assertLess(time.monotonic() - start, 1.5)  # senza «Riprova ora» avrebbe atteso 2 secondi
+
+    def test_retry_now_restarts_a_stuck_download(self):
+        import time
+        client = FakeClient([self.msgs[0]], stall_once=True)  # Telegram smette di rispondere
+        started = []
+
+        class Listener(Recorder):
+            def file_started(self, item):
+                started.append(item)
+
+        async def act(engine):
+            while not started:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.2)
+            engine.retry_now(started[0])
+
+        begin = time.monotonic()
+        s = self.run_with(client, Listener(), act)
+        self.assertEqual((s.completed, s.failed), (1, 0))
+        self.assertLess(time.monotonic() - begin, 5)  # senza, si aspettavano CHUNK_TIMEOUT secondi
+        self.assertEqual((self.dest / "Canale_ Prova" / "libro.pdf").read_bytes(), self.big)
+
+    def test_dropped_file_leaves_the_queue_for_good(self):
+        client = FakeClient([self.msgs[0], self.msgs[2]], stall_once=True)  # il primo resta appeso
+        started, finished = [], []
+
+        class Listener(Recorder):
+            def file_started(self, item):
+                started.append(item)
+
+            def file_finished(self, item, ok, error):
+                finished.append((item.name, ok))
+
+        async def act(engine):
+            while not started:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.2)
+            engine.drop(started[0])
+
+        s = self.run_with(client, Listener(), act, parallel=1)
+        self.assertEqual((s.completed, s.failed, s.queued), (1, 0, 1))
+        self.assertIn(("libro.pdf", False), finished)
+        folder = self.dest / "Canale_ Prova"
+        self.assertEqual(sorted(p.name for p in folder.iterdir()), ["video.mp4"])  # niente .part rimasti
+        self.assertEqual(self.db.get(self._chat_id(), 1)["status"], "dropped")
+        self.assertEqual(self.db.pending_msg_ids(self._chat_id()), [])  # non viene ripreso al riavvio
+
+    def test_dropped_while_waiting_to_retry(self):
+        client = FakeClient([self.msgs[2]], fail_after=0)
+        waiting = []
+
+        class Listener(Recorder):
+            def file_waiting(self, item, text):
+                waiting.append(item)
+
+        async def act(engine):
+            while not waiting:
+                await asyncio.sleep(0.01)
+            engine.drop(waiting[0])
+
+        s = self.run_with(client, Listener(), act)
+        self.assertEqual((s.completed, s.failed, s.queued), (0, 0, 0))
+        self.assertEqual(self.db.get(self._chat_id(), 3)["status"], "dropped")
 
     def test_up_to_eight_parallel_downloads(self):
         client = FakeClient([make_msg(i, f"doc{i}.epub", os.urandom(1000)) for i in range(1, 31)])
