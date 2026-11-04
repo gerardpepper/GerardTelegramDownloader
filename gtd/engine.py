@@ -84,16 +84,50 @@ class IntegrityError(Exception):
 
 
 class Slots:
-    """Download contemporanei. Più motori possono condividerli (es. tutte le chat seguite insieme)."""
+    """Download contemporanei. Più motori possono condividerli (es. tutte le chat seguite insieme).
+    I posti si assegnano in ordine di arrivo: chi ne libera uno si rimette in fila dietro agli altri,
+    altrimenti una chat con tanti file in coda se lo riprenderebbe sempre e le altre non partirebbero mai."""
 
     def __init__(self, limit: int = 1):
         self.limit = max(1, min(MAX_PARALLEL, limit))
         self.busy = 0
-        self.changed = asyncio.Event()
+        self._queue: deque[asyncio.Future] = deque()
+
+    def request(self) -> asyncio.Future:
+        """Biglietto per un posto: già pronto se ce n'è uno libero e nessuno è in fila."""
+        ticket = asyncio.get_running_loop().create_future()
+        if self.busy < self.limit and not self._queue:
+            self.busy += 1
+            ticket.set_result(None)
+        else:
+            self._queue.append(ticket)
+        return ticket
+
+    def withdraw(self, ticket: asyncio.Future) -> None:
+        """Rinuncia (motore annullato): se il posto era già stato assegnato, passa al prossimo in fila."""
+        if ticket.done() and not ticket.cancelled():
+            self.release()
+        else:
+            ticket.cancel()
+            try:
+                self._queue.remove(ticket)
+            except ValueError:
+                pass
 
     def release(self) -> None:
         self.busy -= 1
-        self.changed.set()
+        self._serve()
+
+    def set_limit(self, limit: int) -> None:
+        self.limit = max(1, min(MAX_PARALLEL, limit))
+        self._serve()
+
+    def _serve(self) -> None:
+        while self._queue and self.busy < self.limit:
+            ticket = self._queue.popleft()
+            if not ticket.done():
+                self.busy += 1
+                ticket.set_result(None)
 
 
 class FloodGate:
@@ -243,19 +277,22 @@ class DownloadEngine:
         n = max(1, min(MAX_PARALLEL, n))
         if n == self._slots.limit:
             return
-        self._slots.limit = n
-        self._slots.changed.set()
+        self._slots.set_limit(n)
         self.l.log("info", tr("Download paralleli: {n}", n=n))
 
-    async def _wait(self, event: asyncio.Event) -> None:
-        """Attende l'evento, ma esce subito (Cancelled) se questo motore viene annullato."""
-        if not event.is_set():
-            waiters = [asyncio.ensure_future(event.wait()), asyncio.ensure_future(self._cancel_event.wait())]
+    async def _wait(self, target: asyncio.Event | asyncio.Future) -> None:
+        """Attende l'evento (o il biglietto di uno slot), ma esce subito (Cancelled) se questo motore
+        viene annullato. Il biglietto non viene annullato qui: ci pensa chi l'ha chiesto."""
+        is_event = isinstance(target, asyncio.Event)
+        if not (target.is_set() if is_event else target.done()):
+            first = asyncio.ensure_future(target.wait()) if is_event else target
+            cancel = asyncio.ensure_future(self._cancel_event.wait())
             try:
-                await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+                await asyncio.wait([first, cancel], return_when=asyncio.FIRST_COMPLETED)
             finally:
-                for w in waiters:
-                    w.cancel()
+                cancel.cancel()
+                if is_event:
+                    first.cancel()
         if self._cancelled:
             raise Cancelled
 
@@ -263,12 +300,17 @@ class DownloadEngine:
         slots = self._slots
         while True:
             if self._shared_slots and not self._running.is_set():
-                await self._wait(self._running)  # in pausa non si prendono slot condivisi con altre chat
-            if slots.busy < slots.limit:
-                break
-            slots.changed.clear()
-            await self._wait(slots.changed)
-        slots.busy += 1
+                await self._wait(self._running)  # in pausa non ci si mette in fila per gli slot condivisi
+            ticket = slots.request()
+            try:
+                await self._wait(ticket)
+            except Cancelled:
+                slots.withdraw(ticket)
+                raise
+            if self._shared_slots and not self._running.is_set():
+                slots.release()  # messa in pausa mentre era in fila: il posto va al prossimo
+                continue
+            return
 
     async def _sleep_without_slot(self, seconds: float) -> None:
         """Attesa prima di un nuovo tentativo: intanto lo slot va a un altro file

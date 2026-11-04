@@ -230,6 +230,43 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([s.completed for s in results], [12, 12])
         self.assertEqual(peak, 3)
 
+    def test_busy_followed_chat_shares_slots_fairly(self):
+        """Il caso del 3/11: «LA BIBLIOTECA» con migliaia di file in coda si riprendeva sempre lo slot
+        appena liberato e «OPEN», arrivata dopo, non ha scaricato nulla per 7 ore."""
+        def slow(client):
+            original = client.iter_download
+
+            async def slowly(*args, **kwargs):
+                await asyncio.sleep(0.03)
+                async for chunk in original(*args, **kwargs):
+                    yield chunk
+            client.iter_download = slowly
+            return client
+
+        busy = slow(FakeClient([make_msg(i, f"biblioteca{i}.epub", os.urandom(300)) for i in range(1, 61)]))
+        late = slow(FakeClient([make_msg(i, f"open{i}.mkv", os.urandom(300)) for i in range(1000, 1004)]))
+        for m in late.messages:
+            m.peer_id = OTHER
+        order = []
+
+        class Tracker(Recorder):
+            def file_finished(self, item, ok, error):
+                order.append(item.name)
+
+        async def scenario():
+            slots = Slots(2)
+            first = asyncio.create_task(DownloadEngine(busy, self.db, Tracker(), slots=slots).run(
+                JobOptions(entity=ENTITY, source_name="A", destination=self.dest, extensions=set())))
+            await asyncio.sleep(0.3)  # la prima chat ha già la coda piena e gli slot occupati
+            second = DownloadEngine(late, self.db, Tracker(), slots=slots).run(
+                JobOptions(entity=OTHER, source_name="B", destination=self.dest, extensions=set()))
+            return await asyncio.gather(first, second)
+
+        a, b = asyncio.run(scenario())
+        self.assertEqual((a.completed, b.completed), (60, 4))
+        last_open = max(i for i, name in enumerate(order) if name.startswith("open"))
+        self.assertLess(last_open, 30, order)  # la seconda chat scarica a turno, non dopo tutta la prima
+
     def test_paused_followed_chat_does_not_block_others(self):
         """Pausa su una chat seguita: i suoi download fermi lasciano gli slot condivisi alle altre."""
         slow = FakeClient([make_msg(i, f"lento{i}.epub", os.urandom(3 * CHUNK_SIZE)) for i in range(1, 4)])

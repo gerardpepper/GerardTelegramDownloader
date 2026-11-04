@@ -660,8 +660,7 @@ class FollowPage(QWidget):
         self._fill_table()
 
     def _on_parallel_changed(self, value: int) -> None:
-        self.slots.limit = value
-        self.slots.changed.set()  # i download in attesa ricontrollano subito
+        self.slots.set_limit(value)  # se aumentano, i download in fila partono subito
         self.win.settings.follow_parallel = value
         self.win.settings.save()
         self._fit_files_height()
