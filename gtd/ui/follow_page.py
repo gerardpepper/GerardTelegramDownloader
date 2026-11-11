@@ -121,6 +121,10 @@ class FollowDialog(QDialog):
         self.dedupe_chk = QCheckBox(tr("Salta i doppioni (stesso file ripubblicato con un altro nome)"))
         self.dedupe_chk.setChecked(chat.skip_duplicates)
         form.addRow("", self.dedupe_chk)
+        self.downloaded_chk = QCheckBox(tr("Non riscaricare i file già scaricati in passato, anche se non sono più nella cartella"))
+        self.downloaded_chk.setToolTip(tr("Utile se sposti i file altrove (per esempio in un archivio .7z): l'app ricorda cosa ha già scaricato e non lo riscarica, nemmeno con «Ricontrolla da capo»"))
+        self.downloaded_chk.setChecked(chat.skip_downloaded)
+        form.addRow("", self.downloaded_chk)
 
         self.history_chk = QCheckBox(tr("Scarica anche i file già presenti nella chat"))
         self.history_chk.setToolTip(tr("Senza spunta vengono scaricati solo i file che arrivano da adesso in poi"))
@@ -169,6 +173,7 @@ class FollowDialog(QDialog):
         self.chat.folder_by_date = self.by_date.isChecked()
         self.chat.duplicate_policy = self.dup_combo.currentData()
         self.chat.skip_duplicates = self.dedupe_chk.isChecked()
+        self.chat.skip_downloaded = self.downloaded_chk.isChecked()
         self.accept()
 
     def _fail(self, text: str) -> None:
@@ -542,7 +547,8 @@ class FollowPage(QWidget):
         was_running = id(chat) in self._runs
         await self._stop(chat)
         for name in ("destination", "presets", "custom_extensions", "name_filter", "name_in_caption",
-                     "folder_by_source", "folder_by_type", "folder_by_date", "duplicate_policy", "skip_duplicates"):
+                     "folder_by_source", "folder_by_type", "folder_by_date", "duplicate_policy", "skip_duplicates",
+                     "skip_downloaded"):
             setattr(chat, name, getattr(draft, name))
         self.log("info", tr("Impostazioni aggiornate"), chat.name)
         if rescan:
@@ -561,6 +567,11 @@ class FollowPage(QWidget):
             text = tr("Rileggo tutta «{source}» dall'inizio e riscarico TUTTI i file che corrispondono ai filtri, "
                       "sovrascrivendo quelli già presenti nella cartella.\n"
                       "Su una chat grande può richiedere molto tempo.", source=source)
+        elif chat.skip_downloaded:
+            text = tr("Rileggo tutta «{source}» dall'inizio e scarico solo i file mai scaricati prima "
+                      "(per esempio quelli che rientrano in filtri nuovi).\n"
+                      "I file già scaricati in passato vengono saltati, anche se non sono più nella cartella. "
+                      "Su una chat grande la lettura richiede qualche minuto.", source=source)
         else:
             text = tr("Rileggo tutta «{source}» dall'inizio e scarico solo i file che mancano: quelli cancellati "
                       "o spostati dalla cartella e quelli che rientrano nei filtri ma non erano stati scaricati.\n"
@@ -783,7 +794,7 @@ class FollowPage(QWidget):
             folder_by_source=chat.folder_by_source, folder_by_type=chat.folder_by_type,
             folder_by_date=chat.folder_by_date, parallel=self.slots.limit,
             duplicate_policy=chat.duplicate_policy, skip_duplicates=chat.skip_duplicates,
-            follow=True, resume_from_last=not full_scan)
+            skip_downloaded=chat.skip_downloaded, follow=True, resume_from_last=not full_scan)
         run.engine = DownloadEngine(self.client, self.win.db, run, slots=self.slots, flood=self.flood)
         if run.stopping:  # fermata mentre si risolveva la chat
             return True

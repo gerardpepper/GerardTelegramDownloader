@@ -72,6 +72,15 @@ Con **Salta i doppioni** attivo, lo stesso file ripubblicato nel canale con un a
 (stesso SHA-256) e scartato. Ogni file saltato compare in giallo nel registro con il motivo;
 la casella **Mostra avvisi** nasconde o mostra le righe gialle.
 
+### File spostati o archiviati
+Con **Non riscaricare i file già scaricati in passato, anche se non sono più nella cartella** (attiva di serie)
+puoi spostare i file altrove, per esempio in un archivio `.7z`, senza che l'app li riscarichi: ricorda in `state.db`
+ogni file già scaricato e lo salta (riga gialla «già scaricato in passato, non più nella cartella»), anche con
+*Ricontrolla da capo*. Vale anche per lo stesso file ripubblicato in un altro messaggio e per i file che erano
+già nella cartella senza essere stati scaricati dall'app: ne ricorda nome e dimensione (tabella `known_files`),
+e lo stesso elenco si può riempire con il contenuto di archivi creati a mano. Togli la spunta se
+vuoi che i file cancellati dalla cartella vengano riscaricati.
+
 ### Seguire le chat (scheda «Segui»)
 Nella scheda **Segui** tieni d'occhio quante chat vuoi, ognuna con la sua cartella e i suoi filtri:
 l'app resta in ascolto, Telegram la avvisa dei nuovi messaggi e i file vengono scaricati subito
@@ -87,8 +96,9 @@ l'app resta in ascolto, Telegram la avvisa dei nuovi messaggi e i file vengono s
 - Ogni chat ha le stesse opzioni della scheda Download: **File già esistenti** (salta / rinomina / sovrascrivi)
   e **Salta i doppioni**.
 - **Ricontrolla da capo…** (anche dal tasto destro sulla riga) rilegge una volta tutta la chat e poi torna
-  in ascolto. Con «Salta se già presente» scarica solo ciò che manca (file cancellati o spostati dalla cartella,
-  file che rientrano nei filtri ma non erano stati scaricati); con «Sovrascrivi» riscarica tutto.
+  in ascolto. Con «Salta se già presente» scarica solo ciò che manca: i file che rientrano nei filtri ma non erano
+  stati scaricati e, se togli la spunta a *Non riscaricare i file già scaricati in passato*, anche quelli
+  cancellati o spostati dalla cartella; con «Sovrascrivi» riscarica tutto.
   Prima di partire chiede conferma e dice quale dei due casi si applica.
 - I download paralleli indicati in questa scheda valgono per tutte le chat seguite insieme.
 

@@ -387,4 +387,12 @@ STRINGS: dict[str, str] = {
         'quitado de la cola',
     '{name}: nuovo tentativo richiesto':
         '{name}: nuevo intento solicitado',
+    'Non riscaricare i file già scaricati in passato, anche se non sono più nella cartella':
+        'No volver a descargar los archivos ya descargados, aunque ya no estén en la carpeta',
+    "Utile se sposti i file altrove (per esempio in un archivio .7z): l'app ricorda cosa ha già scaricato e non lo riscarica, nemmeno con «Ricontrolla da capo»":
+        'Útil si mueves los archivos a otro sitio (por ejemplo a un archivo .7z): la app recuerda lo que ya descargó y no lo vuelve a descargar, ni siquiera con «Revisar desde el principio»',
+    'già scaricato in passato, non più nella cartella':
+        'ya descargado, ya no está en la carpeta',
+    "Rileggo tutta «{source}» dall'inizio e scarico solo i file mai scaricati prima (per esempio quelli che rientrano in filtri nuovi).\nI file già scaricati in passato vengono saltati, anche se non sono più nella cartella. Su una chat grande la lettura richiede qualche minuto.":
+        'Vuelvo a leer todo «{source}» desde el principio y descargo solo los archivos nunca descargados (por ejemplo los que cumplen filtros nuevos).\nLos archivos ya descargados se omiten, aunque ya no estén en la carpeta. En un chat grande la lectura tarda unos minutos.',
 }

@@ -1,6 +1,8 @@
 """Stato persistente dei download (SQLite) per la ripresa dopo interruzioni."""
 
 import sqlite3
+import unicodedata
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
@@ -12,10 +14,16 @@ CREATE TABLE IF NOT EXISTS downloads (
     target     TEXT    NOT NULL,
     size       INTEGER NOT NULL,
     downloaded INTEGER NOT NULL DEFAULT 0,
-    status     TEXT    NOT NULL,          -- pending | partial | completed | failed
+    status     TEXT    NOT NULL,          -- pending | partial | completed | failed | dropped | known
     sha256     TEXT,
     updated_at TEXT    NOT NULL,
     PRIMARY KEY (chat_id, msg_id)
+);
+-- file che l'utente ha già (trovati nella cartella o importati da archivi): nome normalizzato + dimensione
+CREATE TABLE IF NOT EXISTS known_files (
+    name TEXT    NOT NULL,
+    size INTEGER NOT NULL,
+    PRIMARY KEY (name, size)
 );
 CREATE TABLE IF NOT EXISTS chats (
     chat_id     INTEGER PRIMARY KEY,
@@ -31,6 +39,10 @@ _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_downloads_doc ON downloads(doc_id)",
     "CREATE INDEX IF NOT EXISTS idx_downloads_sha ON downloads(sha256)",
 ]
+
+
+def known_key(name: str) -> str:
+    return unicodedata.normalize("NFC", name).casefold()
 
 
 def _now() -> str:
@@ -76,6 +88,17 @@ class StateDB:
         return self.conn.execute(
             """SELECT * FROM downloads WHERE sha256=? AND status='completed'
                AND NOT (chat_id=? AND msg_id=?) LIMIT 1""", (sha256, chat_id, msg_id)).fetchone()
+
+    def add_known(self, files: Iterable[tuple[str, int]], commit: bool = True) -> None:
+        """Ricorda file già posseduti (anche se poi vengono spostati o archiviati altrove)."""
+        self.conn.executemany("INSERT OR IGNORE INTO known_files (name, size) VALUES (?, ?)",
+                              ((known_key(n), s) for n, s in files))
+        if commit:
+            self.conn.commit()
+
+    def is_known(self, name: str, size: int) -> bool:
+        return self.conn.execute("SELECT 1 FROM known_files WHERE name=? AND size=?",
+                                 (known_key(name), size)).fetchone() is not None
 
     def pending_msg_ids(self, chat_id: int) -> list[int]:
         return [row["msg_id"] for row in self.conn.execute(

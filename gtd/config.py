@@ -46,6 +46,7 @@ class FollowedChat:
     folder_by_date: bool = False
     duplicate_policy: str = "skip"   # skip | rename | overwrite, come nella scheda Download
     skip_duplicates: bool = True
+    skip_downloaded: bool = True     # non riscarica i file già scaricati, anche se spostati dalla cartella
     active: bool = True             # avviata (▶): la si segue, anche al prossimo avvio dell'app
 
     @classmethod
@@ -74,6 +75,7 @@ class Settings:
     parallel: int = 2
     notifications: bool = True
     skip_duplicates: bool = True
+    skip_downloaded: bool = True
     followed: list[FollowedChat] = field(default_factory=list)
     follow_parallel: int = 2  # download contemporanei di tutte le chat seguite insieme
     follow_show_warnings: bool = True

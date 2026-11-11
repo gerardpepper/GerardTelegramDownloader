@@ -184,6 +184,7 @@ class JobOptions:
     folder_by_date: bool = False
     parallel: int = 2
     skip_duplicates: bool = True    # salta lo stesso file ripubblicato con un altro nome
+    skip_downloaded: bool = True    # salta i file già scaricati in passato anche se non sono più nella cartella
     follow: bool = False            # dopo l'analisi resta in ascolto dei nuovi messaggi
     resume_from_last: bool = False  # analizza solo dopo l'ultimo messaggio visto (+ i file rimasti in sospeso)
 
@@ -713,12 +714,23 @@ class DownloadEngine:
         reserved = self._reserved
 
         record = self.db.get(chat_id, msg.id)
+        if (opts.skip_downloaded and policy != "overwrite" and not (record and record["status"] == "completed")
+                and not target.exists() and self.db.is_known(name, size)):
+            # stesso nome e dimensione di un file che l'utente aveva già (es. poi archiviato in un .7z)
+            if record:
+                Path(record["target"] + ".part").unlink(missing_ok=True)
+                self.db.set_status(chat_id, msg.id, "known")
+            self._skip(summary, name, tr("già scaricato in passato, non più nella cartella"))
+            return None
         if record and policy != "overwrite":
             previous = Path(record["target"])
-            if (record["status"] == "completed" and previous.exists()
-                    and previous.stat().st_size == record["size"]):
-                self._skip(summary, name, tr("già scaricato in precedenza"))
-                return None
+            if record["status"] == "completed":
+                if previous.exists() and previous.stat().st_size == record["size"]:
+                    self._skip(summary, name, tr("già scaricato in precedenza"))
+                    return None
+                if opts.skip_downloaded:  # spostato o archiviato altrove: l'utente ce l'ha già
+                    self._skip(summary, name, tr("già scaricato in passato, non più nella cartella"))
+                    return None
             partial = previous.with_name(previous.name + ".part")
             if record["status"] != "completed" and partial.exists() and previous.parent == target.parent:
                 reserved.add(str(previous).lower())
@@ -731,7 +743,7 @@ class DownloadEngine:
                            duplicate=True)
                 return None
             other = self.db.find_completed_doc(doc_id)
-            if other and Path(other["target"]).exists():
+            if other and (opts.skip_downloaded or Path(other["target"]).exists()):
                 self._skip(summary, name, tr("doppione di «{other}» già scaricato", other=Path(other["target"]).name),
                            duplicate=True)
                 return None
@@ -740,6 +752,7 @@ class DownloadEngine:
         if target.exists() or key in reserved:
             on_disk_same = target.exists() and key not in reserved and target.stat().st_size == size
             if policy != "overwrite" and on_disk_same:  # stesso nome e stessa dimensione: è già lì
+                self.db.add_known([(name, size)], commit=False)  # da ricordare anche se poi viene spostato
                 self._skip(summary, name, tr("già presente nella cartella"))
                 return None
             if not (policy == "overwrite" and key not in reserved):

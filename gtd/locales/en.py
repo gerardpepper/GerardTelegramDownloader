@@ -387,4 +387,12 @@ STRINGS: dict[str, str] = {
         'removed from queue',
     '{name}: nuovo tentativo richiesto':
         '{name}: new attempt requested',
+    'Non riscaricare i file già scaricati in passato, anche se non sono più nella cartella':
+        "Don't download again files downloaded in the past, even if they're no longer in the folder",
+    "Utile se sposti i file altrove (per esempio in un archivio .7z): l'app ricorda cosa ha già scaricato e non lo riscarica, nemmeno con «Ricontrolla da capo»":
+        "Useful if you move files elsewhere (for example into a .7z archive): the app remembers what it has already downloaded and won't download it again, not even with «Recheck from the start»",
+    'già scaricato in passato, non più nella cartella':
+        'downloaded in the past, no longer in the folder',
+    "Rileggo tutta «{source}» dall'inizio e scarico solo i file mai scaricati prima (per esempio quelli che rientrano in filtri nuovi).\nI file già scaricati in passato vengono saltati, anche se non sono più nella cartella. Su una chat grande la lettura richiede qualche minuto.":
+        "I'll read all of «{source}» again from the start and download only files never downloaded before (for example those matching new filters).\nFiles downloaded in the past are skipped, even if they're no longer in the folder. On a large chat reading takes a few minutes.",
 }

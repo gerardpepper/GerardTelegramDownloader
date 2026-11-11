@@ -387,4 +387,12 @@ STRINGS: dict[str, str] = {
         'retiré de la file',
     '{name}: nuovo tentativo richiesto':
         '{name} : nouvelle tentative demandée',
+    'Non riscaricare i file già scaricati in passato, anche se non sono più nella cartella':
+        "Ne pas retélécharger les fichiers déjà téléchargés, même s'ils ne sont plus dans le dossier",
+    "Utile se sposti i file altrove (per esempio in un archivio .7z): l'app ricorda cosa ha già scaricato e non lo riscarica, nemmeno con «Ricontrolla da capo»":
+        "Utile si vous déplacez les fichiers ailleurs (par exemple dans une archive .7z) : l'application se souvient de ce qu'elle a déjà téléchargé et ne le retélécharge pas, même avec «Revérifier depuis le début»",
+    'già scaricato in passato, non più nella cartella':
+        'déjà téléchargé, plus dans le dossier',
+    "Rileggo tutta «{source}» dall'inizio e scarico solo i file mai scaricati prima (per esempio quelli che rientrano in filtri nuovi).\nI file già scaricati in passato vengono saltati, anche se non sono più nella cartella. Su una chat grande la lettura richiede qualche minuto.":
+        "Je relis tout «{source}» depuis le début et je ne télécharge que les fichiers jamais téléchargés (par exemple ceux qui correspondent à de nouveaux filtres).\nLes fichiers déjà téléchargés sont ignorés, même s'ils ne sont plus dans le dossier. Sur une grande discussion, la lecture prend quelques minutes.",
 }

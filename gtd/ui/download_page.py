@@ -217,11 +217,14 @@ class DownloadPage(QWidget):
         fo.addRow(self._label("Download paralleli:"), self.parallel_spin)
         self.dedupe_chk = QCheckBox()
         self._t(self.dedupe_chk.setText, "Salta i doppioni (stesso file ripubblicato con un altro nome)")
+        self.downloaded_chk = QCheckBox()
+        self._t(self.downloaded_chk.setText, "Non riscaricare i file già scaricati in passato, anche se non sono più nella cartella")
+        self._t(self.downloaded_chk.setToolTip, "Utile se sposti i file altrove (per esempio in un archivio .7z): l'app ricorda cosa ha già scaricato e non lo riscarica, nemmeno con «Ricontrolla da capo»")
         self.notify_chk = QCheckBox()
         self._t(self.notify_chk.setText, "Notifiche di Windows (fine batch, errori, nuovi file)")
         self.shutdown_chk = QCheckBox()
         self._t(self.shutdown_chk.setText, "Spegni il PC al termine")
-        for cb in (self.dedupe_chk, self.notify_chk, self.shutdown_chk):
+        for cb in (self.dedupe_chk, self.downloaded_chk, self.notify_chk, self.shutdown_chk):
             fo.addRow("", cb)
         lv.addWidget(g_opt)
 
@@ -370,6 +373,7 @@ class DownloadPage(QWidget):
         self._fit_table_height()
         self.notify_chk.setChecked(s.notifications)
         self.dedupe_chk.setChecked(s.skip_duplicates)
+        self.downloaded_chk.setChecked(s.skip_downloaded)
         self.log_panel.warnings_chk.setChecked(s.show_warnings)
 
     def save_settings(self) -> None:
@@ -392,6 +396,7 @@ class DownloadPage(QWidget):
         s.parallel = self.parallel_spin.value()
         s.notifications = self.notify_chk.isChecked()
         s.skip_duplicates = self.dedupe_chk.isChecked()
+        s.skip_downloaded = self.downloaded_chk.isChecked()
         s.show_warnings = self.log_panel.warnings_chk.isChecked()
         s.save()
 
@@ -484,8 +489,8 @@ class DownloadPage(QWidget):
                 except errors.FloodWaitError:
                     self._avatar_generation += 1  # Telegram chiede di rallentare: le altre al prossimo «Aggiorna»
                     return
-                except (errors.RPCError, OSError, ConnectionError, ValueError):
-                    return
+                except (errors.RPCError, OSError, ConnectionError, ValueError, EOFError, asyncio.TimeoutError):
+                    return  # es. foto su un server Telegram bloccato dalla rete (DC 5): resta l'iniziale
                 if icon and generation == self._avatar_generation and index < self.chat_combo.count():
                     self.chat_combo.setItemIcon(index, icon)
 
@@ -559,7 +564,8 @@ class DownloadPage(QWidget):
             custom_extensions=self.custom_ext.text().strip(), name_filter=self.name_edit.text().strip(),
             name_in_caption=self.caption_chk.isChecked(), folder_by_source=self.by_source.isChecked(),
             folder_by_type=self.by_type.isChecked(), folder_by_date=self.by_date.isChecked(),
-            duplicate_policy=self.dup_combo.currentData(), skip_duplicates=self.dedupe_chk.isChecked())
+            duplicate_policy=self.dup_combo.currentData(), skip_duplicates=self.dedupe_chk.isChecked(),
+            skip_downloaded=self.downloaded_chk.isChecked())
         self.win.follow_page.add_chat(chat)
 
     def _on_pause(self) -> None:
@@ -625,7 +631,7 @@ class DownloadPage(QWidget):
                 duplicate_policy=self.dup_combo.currentData(),
                 folder_by_source=self.by_source.isChecked(), folder_by_type=self.by_type.isChecked(),
                 folder_by_date=self.by_date.isChecked(), parallel=self.parallel_spin.value(),
-                skip_duplicates=self.dedupe_chk.isChecked())
+                skip_duplicates=self.dedupe_chk.isChecked(), skip_downloaded=self.downloaded_chk.isChecked())
             self.log("info", tr("Avvio batch: «{source}» → {destination} (filtro: {filter})", source=name,
                                 destination=dest, filter=filter_text(opts.extensions, self.name_edit.text())))
             self.job_peer_id = peer_id
@@ -686,7 +692,7 @@ class DownloadPage(QWidget):
     def _set_running(self, running: bool) -> None:
         for w in (self.chat_combo, self.refresh_btn, self.manual_edit, self.dest_edit, self.browse_btn,
                   self.custom_ext, self.min_size, self.max_size, self.dup_combo, self.by_source, self.by_type,
-                  self.by_date, self.parallel_spin, self.dedupe_chk, self.name_edit, self.caption_chk,
+                  self.by_date, self.parallel_spin, self.dedupe_chk, self.downloaded_chk, self.name_edit, self.caption_chk,
                   self.shutdown_chk, *self.preset_checks.values()):
             w.setEnabled(not running)
         self.start_btn.setEnabled(not running)

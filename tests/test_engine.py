@@ -163,12 +163,49 @@ class EngineTest(unittest.TestCase):
         s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, follow=False)
         self.assertEqual(s.completed, 3)
         (self.dest / "video.mp4").unlink()  # cancellato a mano dalla cartella
-        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False)
+        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, skip_downloaded=False)
         self.assertEqual((s.scanned, s.completed, s.skipped), (3, 1, 2))  # riscarica solo quello che manca
         self.assertEqual((self.dest / "video.mp4").read_bytes(), self.msgs[2].document.data)
         s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, duplicate_policy="overwrite")
         self.assertEqual(s.completed, 3)  # «Sovrascrivi»: riscarica tutto, senza creare copie
         self.assertEqual(sorted(p.name for p in self.dest.iterdir()), ["foto.png", "libro.pdf", "video.mp4"])
+
+    def test_moved_files_are_not_downloaded_again(self):
+        """File spostati altrove (es. in un .7z): con skip_downloaded non vengono riscaricati."""
+        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, follow=False)
+        self.assertEqual(s.completed, 3)
+        for p in self.dest.iterdir():
+            p.unlink()
+        # anche lo stesso file ripubblicato in un altro messaggio è già stato scaricato
+        msgs = self.msgs + [make_msg(9, "libro copia.pdf", self.msgs[0].document.data,
+                                     doc_id=self.msgs[0].document.id)]
+        s, rec = self.run_job(FakeClient(msgs), folder_by_source=False)
+        self.assertEqual((s.completed, s.skipped), (0, 4))
+        self.assertEqual(list(self.dest.iterdir()), [])
+        self.assertTrue(any("non più nella cartella" in t for _, t in rec.logs))
+        # senza l'opzione si comporta come prima: riscarica ciò che manca
+        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, skip_downloaded=False)
+        self.assertEqual(s.completed, 3)
+
+    def test_files_found_in_folder_are_remembered(self):
+        """File già nella cartella (mai scaricati dall'app) e poi archiviati: non vengono riscaricati."""
+        self.dest.mkdir(parents=True, exist_ok=True)
+        for m in self.msgs[:2]:
+            (self.dest / m.file.name).write_bytes(m.document.data)
+        s, _ = self.run_job(FakeClient(self.msgs), folder_by_source=False, follow=False)
+        self.assertEqual((s.completed, s.skipped), (1, 2))
+        for p in self.dest.iterdir():
+            p.unlink()
+        self.db.conn.execute("DELETE FROM downloads WHERE msg_id=3")
+        # importati da un archivio: stesso nome (maiuscole diverse) e stessa dimensione
+        self.db.add_known([("VIDEO.mp4", len(self.msgs[2].document.data))])
+        s, rec = self.run_job(FakeClient(self.msgs), folder_by_source=False)
+        self.assertEqual((s.completed, s.skipped), (0, 3))
+        self.assertEqual(list(self.dest.iterdir()), [])
+        # un file con lo stesso nome ma dimensione diversa è un altro file: si scarica
+        msgs = [make_msg(7, "foto.png", b"z" * 999)]
+        s, _ = self.run_job(FakeClient(msgs), folder_by_source=False)
+        self.assertEqual(s.completed, 1)
 
     def test_only_selected_extension(self):
         msgs = self.msgs + [make_msg(4, "romanzo.EPUB", b"e" * 50), make_msg(5, "altro.epub", b"f" * 60)]
