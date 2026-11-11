@@ -253,6 +253,7 @@ class DownloadEngine:
         self._wake = asyncio.Event()
         self._cancel_event = asyncio.Event()
         self._cancelled = False
+        self._active: dict[int, DownloadItem] = {}  # file in lavorazione (per fermarli subito con cancel)
         # condivisi se più motori lavorano insieme sullo stesso account
         self._flood = flood or FloodGate()
         self._slots = slots or Slots()
@@ -288,6 +289,10 @@ class DownloadEngine:
         self._cancel_event.set()
         self._running.set()
         self._wake.set()
+        # un trasferimento bloccato (server che non risponde) non deve far aspettare il suo timeout
+        for item in list(self._active.values()):
+            if item._task and not item._task.done():
+                item._task.cancel()
 
     def retry_now(self, item: DownloadItem) -> None:
         """Salta l'attesa prima del prossimo tentativo, o interrompe il trasferimento e lo ricomincia
@@ -766,6 +771,13 @@ class DownloadEngine:
     # ---- download --------------------------------------------------------
 
     async def _process(self, item: DownloadItem, summary: Summary) -> None:
+        self._active[id(item)] = item
+        try:
+            await self._process_item(item, summary)
+        finally:
+            self._active.pop(id(item), None)
+
+    async def _process_item(self, item: DownloadItem, summary: Summary) -> None:
         self.l.file_started(item)
         ok, duplicate, error, attempt = False, False, "", 0
         while attempt < MAX_ATTEMPTS:
@@ -783,8 +795,8 @@ class DownloadEngine:
                 error = tr("annullato")
                 break
             except asyncio.CancelledError:
-                if item.dropped:
-                    error = tr("annullato")
+                if item.dropped or (self._cancelled and not asyncio.current_task().cancelling()):
+                    error = tr("annullato")  # tolto dalla coda, oppure motore fermato (cancel)
                     break
                 if not item._restart:
                     raise  # annullato da fuori: non è un «Riprova ora»

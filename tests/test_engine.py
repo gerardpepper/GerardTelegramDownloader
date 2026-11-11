@@ -561,6 +561,29 @@ class EngineTest(unittest.TestCase):
         self.assertLess(time.monotonic() - begin, 5)  # senza, si aspettavano CHUNK_TIMEOUT secondi
         self.assertEqual((self.dest / "Canale_ Prova" / "libro.pdf").read_bytes(), self.big)
 
+    def test_cancel_stops_a_stuck_download_at_once(self):
+        """Fermare la chat con un download appeso: non si aspetta il timeout, il file resta in sospeso."""
+        import time
+        client = FakeClient([self.msgs[0]], stall_once=True)
+        started = []
+
+        class Listener(Recorder):
+            def file_started(self, item):
+                started.append(item)
+
+        async def act(engine):
+            while not started:
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.2)
+            engine.cancel()
+
+        begin = time.monotonic()
+        s = self.run_with(client, Listener(), act)
+        self.assertLess(time.monotonic() - begin, 3)
+        self.assertTrue(s.cancelled)
+        self.assertEqual((s.completed, s.failed), (0, 0))
+        self.assertIn(self.msgs[0].id, self.db.pending_msg_ids(self._chat_id()))  # ripreso al prossimo giro
+
     def test_dropped_file_leaves_the_queue_for_good(self):
         client = FakeClient([self.msgs[0], self.msgs[2]], stall_once=True)  # il primo resta appeso
         started, finished = [], []

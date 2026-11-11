@@ -590,6 +590,11 @@ class FollowPage(QWidget):
         chat.active = True
         self.win.settings.save()
         self.log("info", tr("Ricontrollo la chat da capo"), chat.name)
+        if id(chat) in self._runs:
+            # ripartita nel frattempo (es. «Modifica…» confermata mentre si fermava): va fermata di nuovo,
+            # altrimenti la rilettura completa verrebbe ignorata
+            spawn(self._rescan(chat))
+            return
         self._start(chat, with_history=True)
 
     def _on_context_menu(self, pos) -> None:
