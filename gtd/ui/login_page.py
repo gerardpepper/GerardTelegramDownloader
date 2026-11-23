@@ -31,7 +31,7 @@ API_GUIDE = N_(
     "(32 caratteri);<br>"
     "5. premi «Salva e continua», poi inserisci il tuo numero: per accedere riceverai un altro codice "
     "nell'app Telegram.<br><br>"
-    "Le chiavi e la sessione restano solo su questo PC, cifrate con il tuo utente Windows. "
+    "Le chiavi e la sessione restano solo su questo PC, protette dal tuo utente. "
     "Non condividere mai l'api_hash. Dal secondo avvio l'accesso è automatico."
 )
 

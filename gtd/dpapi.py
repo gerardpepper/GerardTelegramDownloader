@@ -1,4 +1,4 @@
-"""Cifratura locale tramite Windows DPAPI (legata all'utente Windows corrente)."""
+"""Cifratura locale tramite Windows DPAPI (legata all'utente Windows corrente). Solo Windows: usare gtd.secret."""
 
 import base64
 import ctypes

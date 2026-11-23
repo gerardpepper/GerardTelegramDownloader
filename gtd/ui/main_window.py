@@ -2,10 +2,9 @@
 
 import html
 import logging
-import os
 
-from PyQt6.QtCore import QSize, Qt, QTimer
-from PyQt6.QtGui import QAction, QActionGroup, QPalette
+from PyQt6.QtCore import QSize, Qt, QTimer, QUrl
+from PyQt6.QtGui import QAction, QActionGroup, QDesktopServices, QPalette
 from PyQt6.QtWidgets import (QApplication, QCheckBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                              QStackedWidget, QSystemTrayIcon, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 from telethon import utils
@@ -136,7 +135,7 @@ class MainWindow(QMainWindow):
         self.logout_action.triggered.connect(self._on_logout)
         account.addAction(self.logout_action)
         open_data = QAction(tr("Apri cartella dati dell'app"), self)
-        open_data.triggered.connect(lambda: os.startfile(data_dir()))
+        open_data.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(data_dir()))))
         account.addAction(open_data)
         account.addSeparator()
         quit_action = QAction(tr("Esci"), self)
@@ -161,7 +160,7 @@ class MainWindow(QMainWindow):
 
         language_menu = view.addMenu(tr("Lingua"))
         group = QActionGroup(self)
-        options = [(tr("Automatica (lingua di Windows)"), "")] + [(name, code) for code, name in i18n.LANGUAGES.items()]
+        options = [(tr("Automatica (lingua del sistema)"), "")] + [(name, code) for code, name in i18n.LANGUAGES.items()]
         for label, code in options:
             action = QAction(label, self, checkable=True)
             action.setChecked(self.settings.language == code)
@@ -303,7 +302,7 @@ class MainWindow(QMainWindow):
             self.taskbar.clear()
             return
         self.setWindowTitle(f"{int(percent)}% · {details.splitlines()[0]} — {APP_TITLE}")
-        self.tray.setToolTip(f"{APP_TITLE} — {int(percent)}%\n{details}"[:127])  # limite di Windows
+        self.tray.setToolTip(f"{APP_TITLE} — {int(percent)}%\n{details}"[:127])  # limite di Windows per il suggerimento
         if state == "waiting":
             self.taskbar.set_state(taskbar.INDETERMINATE)
             return

@@ -1,6 +1,6 @@
 # Gerard Telegram Downloader
 
-App desktop per Windows 10/11 che scarica in blocco media e documenti da canali, gruppi e chat di Telegram.
+App desktop per Windows 10/11 e Linux che scarica in blocco media e documenti da canali, gruppi e chat di Telegram.
 
 ## Primo avvio: come ottenere le chiavi API
 
@@ -21,7 +21,9 @@ Le chiavi si creano **una volta sola** e sono legate al tuo account Telegram.
 
 Dal secondo avvio in poi l'accesso è automatico.
 Chiavi e sessione sono salvate in `%APPDATA%\GerardTelegramDownloader`, cifrate con il tuo utente Windows (DPAPI):
-non funzionano se copiate su un altro PC o un altro utente. **Non condividere mai api_hash né la cartella dati.**
+non funzionano se copiate su un altro PC o un altro utente. Su Linux sono in `~/.config/GerardTelegramDownloader`,
+in file leggibili solo dal tuo utente ma non cifrati (come fa Telegram Desktop): chi ha accesso al tuo account Linux
+può usarle. **Non condividere mai api_hash né la cartella dati.**
 
 La stessa guida è nell'app: nella pagina di accesso e, in ogni momento, nel menu **? → Guida**.
 
@@ -126,11 +128,29 @@ Il cambio è immediato; le righe già scritte nel registro restano nella lingua 
 Le traduzioni sono in `gtd/locales/` (il testo italiano è la chiave); `tests/test_i18n.py` segnala le frasi
 non tradotte e `python tests\test_i18n.py` le elenca tutte.
 
+## Linux
+
+L'eseguibile per Linux è `dist/linux/GerardTelegramDownloader` (un unico file, come l'exe di Windows).
+Per installarlo per il tuo utente, con la voce nel menu delle applicazioni, copia la cartella `dist/linux` sul PC
+Linux ed esegui `./installa.sh` (non servono permessi di amministratore). Funziona sulle distribuzioni con glibc 2.36
+o più recente (Ubuntu 24.04+, Debian 12+, Fedora 37+, Mint 22+…) e un desktop X11 o Wayland.
+
+Differenze rispetto a Windows:
+- chiavi e sessione non sono cifrate (vedi sopra);
+- niente barra di avanzamento sull'icona nella barra delle applicazioni;
+- la sospensione durante i download viene bloccata con `systemd-inhibit` (se il sistema non ce l'ha, il PC può
+  sospendersi: disattiva la sospensione automatica);
+- «Spegni il PC al termine» usa `systemctl poweroff` dopo 2 minuti: per annullare chiudi l'app.
+
+Se all'avvio compare l'errore «Could not load the Qt platform plugin "xcb"», manca una libreria di sistema:
+su Ubuntu/Debian `sudo apt install libxcb-cursor0`.
+
 ## Sviluppo
 
 ```powershell
 .\avvia.ps1          # lancia l'app dai sorgenti (al primo avvio crea l'ambiente Python)
 .\build.ps1          # esegue i test e crea dist\GerardTelegramDownloader.exe
+.\build-linux.ps1    # stessa cosa per Linux, in Docker: crea dist\linux\GerardTelegramDownloader
 .venv\Scripts\python -m unittest discover -s tests -v
 ```
 
@@ -138,6 +158,7 @@ Gli script usano il primo ambiente Python del progetto che funziona per l'utente
 (`.venv`, poi `.venv-*`). Un ambiente creato da un altro utente punta al suo Python e non si può usare:
 in quel caso ne creano uno nuovo, `.venv-<utente>`. Le funzioni sono in `tools\python.ps1`.
 Per i test usa l'ambiente che funziona per te (es. `.venv-<utente>\Scripts\python`).
+Su un PC Linux si può usare direttamente `./build.sh` (crea l'ambiente `.venv-linux`).
 
 Struttura:
 
@@ -147,10 +168,12 @@ Struttura:
 | `gtd/engine.py` | scansione messaggi, filtri, download a blocchi, ripresa, FloodWait, parallelismo |
 | `gtd/state.py` | database SQLite dello stato dei download |
 | `gtd/telegram.py` | client Telethon e sessione cifrata |
-| `gtd/dpapi.py` | cifratura Windows DPAPI |
-| `gtd/config.py` | impostazioni e log (`%APPDATA%\GerardTelegramDownloader`) |
+| `gtd/secret.py` | protezione di chiavi e sessione (`gtd/dpapi.py` su Windows, file privati su Linux) |
+| `gtd/power.py`, `gtd/taskbar.py` | niente sospensione durante i download, avanzamento sull'icona (solo Windows) |
+| `gtd/config.py` | impostazioni e log (`%APPDATA%\GerardTelegramDownloader`, su Linux `~/.config/…`) |
 | `gtd/ui/` | finestra principale, accesso, schede Download e Segui, registro |
 | `tools/python.ps1` | scelta o creazione dell'ambiente Python, usata da `avvia.ps1` e `build.ps1` |
+| `build.sh`, `tools/linux/` | build Linux (`Dockerfile`, `installa.sh`), usati da `build-linux.ps1` |
 | `tests/` | test del motore con un client Telegram simulato |
 
 Stack: Python 3.14, Telethon, PyQt6, qasync, PyInstaller.

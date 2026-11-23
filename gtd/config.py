@@ -3,19 +3,26 @@
 import json
 import logging
 import os
+import sys
 from dataclasses import asdict, dataclass, field, fields
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from . import APP_NAME, dpapi
+from . import APP_NAME, secret
 
 log = logging.getLogger(__name__)
 
 
 def data_dir() -> Path:
-    base = Path(os.environ.get("APPDATA") or Path.home())
+    """Windows: %APPDATA%/GerardTelegramDownloader. Linux: ~/.config/GerardTelegramDownloader (solo per te)."""
+    if sys.platform == "win32":
+        base = Path(os.environ.get("APPDATA") or Path.home())
+    else:
+        base = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
     path = base / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
+    if sys.platform != "win32":
+        os.chmod(path, 0o700)  # dentro ci sono chiavi API e sessione, non cifrate su questo sistema
     return path
 
 
@@ -58,7 +65,7 @@ class FollowedChat:
 @dataclass
 class Settings:
     api_id: int = 0
-    api_hash: str = ""  # su disco viene salvato cifrato con DPAPI
+    api_hash: str = ""  # su disco protetto con gtd.secret (DPAPI su Windows)
     destination: str = ""
     last_source_id: int = 0
     last_manual_source: str = ""
@@ -82,7 +89,7 @@ class Settings:
     confirm_close: bool = True  # alla chiusura con download in corso chiede conferma
     show_warnings: bool = True
     theme: str = "system"
-    language: str = ""  # vuoto = lingua di Windows
+    language: str = ""  # vuoto = lingua del sistema
 
     @staticmethod
     def _path() -> Path:
@@ -109,7 +116,7 @@ class Settings:
         encrypted = raw.get("api_hash_enc", "")
         if encrypted:
             try:
-                settings.api_hash = dpapi.unprotect_str(encrypted)
+                settings.api_hash = secret.unprotect_str(encrypted)
             except (OSError, ValueError):
                 log.warning("Impossibile decifrare api_hash salvato")
         return settings
@@ -117,5 +124,5 @@ class Settings:
     def save(self) -> None:
         raw = asdict(self)
         api_hash = raw.pop("api_hash")
-        raw["api_hash_enc"] = dpapi.protect_str(api_hash) if api_hash else ""
+        raw["api_hash_enc"] = secret.protect_str(api_hash) if api_hash else ""
         self._path().write_text(json.dumps(raw, indent=2, ensure_ascii=False), "utf-8")

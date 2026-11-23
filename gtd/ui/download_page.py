@@ -7,6 +7,7 @@ import html
 import logging
 import re
 import subprocess
+import sys
 import time
 from collections import deque
 from datetime import datetime
@@ -221,7 +222,7 @@ class DownloadPage(QWidget):
         self._t(self.downloaded_chk.setText, "Non riscaricare i file già scaricati in passato, anche se non sono più nella cartella")
         self._t(self.downloaded_chk.setToolTip, "Utile se sposti i file altrove (per esempio in un archivio .7z): l'app ricorda cosa ha già scaricato e non lo riscarica, nemmeno con «Ricontrolla da capo»")
         self.notify_chk = QCheckBox()
-        self._t(self.notify_chk.setText, "Notifiche di Windows (fine batch, errori, nuovi file)")
+        self._t(self.notify_chk.setText, "Notifiche del sistema (fine batch, errori, nuovi file)")
         self.shutdown_chk = QCheckBox()
         self._t(self.shutdown_chk.setText, "Spegni il PC al termine")
         for cb in (self.dedupe_chk, self.downloaded_chk, self.notify_chk, self.shutdown_chk):
@@ -609,7 +610,7 @@ class DownloadPage(QWidget):
         self._speed_samples.clear()
         self._totals = (0, 0, 0, 0)
         self.status_label.setText(tr("Analisi della chat in corso…"))
-        keep_awake(True)  # niente sospensione di Windows mentre lavoriamo (era la causa dei blocchi notturni)
+        keep_awake(True)  # niente sospensione del PC mentre lavoriamo (era la causa dei blocchi notturni)
         summary: Summary | None = None
         try:
             try:
@@ -677,11 +678,22 @@ class DownloadPage(QWidget):
             self._schedule_shutdown()
 
     def _schedule_shutdown(self) -> None:
+        if sys.platform != "win32":
+            self.log("warning", tr("Il PC si spegnerà tra 2 minuti. Per annullare chiudi l'app."))
+            spawn(self._linux_shutdown())
+            return
         try:
             subprocess.run(["shutdown", "/s", "/t", "120", "/c",
                             "Gerard Telegram Downloader: " + tr("download completati")],
                            check=True, creationflags=subprocess.CREATE_NO_WINDOW)
             self.log("warning", tr("Il PC si spegnerà tra 2 minuti. Per annullare: Win+R → «shutdown /a»"))
+        except (OSError, subprocess.CalledProcessError) as e:
+            self.log("error", tr("Spegnimento automatico non riuscito: {error}", error=e))
+
+    async def _linux_shutdown(self) -> None:
+        await asyncio.sleep(120)  # chiudendo l'app nel frattempo, lo spegnimento non avviene
+        try:
+            subprocess.run(["systemctl", "poweroff"], check=True, capture_output=True)
         except (OSError, subprocess.CalledProcessError) as e:
             self.log("error", tr("Spegnimento automatico non riuscito: {error}", error=e))
 

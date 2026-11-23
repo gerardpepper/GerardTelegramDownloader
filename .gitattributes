@@ -1,0 +1,3 @@
+# gli script per Linux devono restare con a capo LF anche su Windows
+*.sh text eol=lf
+tools/linux/* text eol=lf
